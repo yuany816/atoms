@@ -37,16 +37,78 @@ export interface GenMessage {
   content: string;
 }
 
-function extractChunkText(chunk: unknown): string {
-  if (typeof chunk === 'string') return chunk;
-  if (chunk && typeof chunk === 'object' && 'content' in chunk) {
-    return String((chunk as { content?: unknown }).content ?? '');
+/**
+ * 解析 SSE 流式响应：逐帧提取 data JSON 的 content，收到 [DONE] 结束，
+ * 收到 [ERROR] 帧时抛出后端透传的错误详情。
+ */
+async function consumeSseStream(
+  response: Response,
+  handlers: { onChunk: (text: string) => void; signal: AbortSignal },
+): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('当前浏览器不支持流式响应读取');
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let full = '';
+
+  const handleData = (payload: string): boolean => {
+    // 返回 true 表示流结束（收到 [DONE]）
+    if (!payload) return false;
+    if (payload === '[DONE]') return true;
+    let parsed: { content?: unknown };
+    try {
+      parsed = JSON.parse(payload) as { content?: unknown };
+    } catch {
+      return false; // 忽略心跳等非 JSON 帧
+    }
+    const content = typeof parsed.content === 'string' ? parsed.content : '';
+    if (content.startsWith('[ERROR]')) {
+      throw new Error(content.slice('[ERROR]'.length).trim() || 'AI 生成失败，请稍后重试');
+    }
+    if (content) {
+      full += content;
+      handlers.onChunk(content);
+    }
+    return false;
+  };
+
+  // 读取与超时中止竞速：即使连接挂起、无新分块到达，也能触发超时错误
+  const abortPromise = new Promise<never>((_resolve, reject) => {
+    handlers.signal.addEventListener(
+      'abort',
+      () => reject(new Error('AI 生成超时，请稍后重试')),
+      { once: true },
+    );
+  });
+
+  try {
+    for (;;) {
+      const { done, value } = await Promise.race([reader.read(), abortPromise]);
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) continue;
+        if (handleData(trimmed.slice(5).trim())) return full;
+      }
+    }
+    const rest = buffer.trim();
+    if (rest.startsWith('data:') && handleData(rest.slice(5).trim())) return full;
+    return full;
+  } finally {
+    reader.releaseLock();
   }
-  return '';
 }
 
 /**
  * 调用真实文本模型流式生成。禁止任何模拟回复；失败时抛错由调用方处理。
+ *
+ * 说明：部署环境中 /api/v1/aihub/* 是平台保留路径，匿名请求会被平台网关
+ * 拒绝（HTTP 403），因此这里改走应用自有后端的 /api/v1/engine/gentxt，
+ * 由后端直接调用 AIHubService 并以相同的 SSE 协议返回。
  */
 export function streamGenerate(opts: {
   messages: GenMessage[];
@@ -54,20 +116,48 @@ export function streamGenerate(opts: {
   onChunk: (text: string) => void;
 }): Promise<string> {
   return new Promise((resolve, reject) => {
-    const params = {
-      messages: opts.messages.map((m) => ({ role: m.role, content: m.content })),
-      model: opts.model,
-      stream: true,
-      onChunk: (chunk: unknown) => {
-        const text = extractChunkText(chunk);
-        if (text) opts.onChunk(text);
-      },
-      onComplete: (result: unknown) => resolve(extractChunkText(result)),
-      onError: (error: unknown) => {
-        reject(new Error(getErrorDetail(error) || 'AI 生成失败，请稍后重试'));
-      },
-    };
-    void client.ai.gentxt(params as Parameters<typeof client.ai.gentxt>[0]);
+    void (async () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 600_000);
+      try {
+        const response = (await client.apiCall.invoke({
+          url: '/api/v1/engine/gentxt',
+          method: 'POST',
+          data: {
+            messages: opts.messages.map((m) => ({ role: m.role, content: m.content })),
+            model: opts.model,
+            stream: true,
+          },
+          options: { responseType: 'stream' },
+        })) as unknown as Response;
+
+        if (!response.ok) {
+          let detail = '';
+          try {
+            const text = await response.text();
+            try {
+              const data = JSON.parse(text) as { detail?: string; message?: string };
+              detail = data.detail || data.message || '';
+            } catch {
+              detail = text.slice(0, 200);
+            }
+          } catch {
+            // 忽略错误体读取失败
+          }
+          throw new Error(`HTTP ${response.status}${detail ? `：${detail}` : ''}`);
+        }
+
+        resolve(await consumeSseStream(response, { onChunk: opts.onChunk, signal: controller.signal }));
+      } catch (error) {
+        if (controller.signal.aborted) {
+          reject(new Error('AI 生成超时，请稍后重试'));
+        } else {
+          reject(new Error(getErrorDetail(error) || 'AI 生成失败，请稍后重试'));
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    })();
   });
 }
 
