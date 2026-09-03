@@ -1,0 +1,30 @@
+{
+    "title": "PublishedApps",
+    "type": "object",
+    "properties": {
+        "id": {
+            "type": "integer"
+        },
+        "project_id": {
+            "type": "string",
+            "maxLength": 64
+        },
+        "name": {
+            "type": "string",
+            "maxLength": 120
+        },
+        "slug": {
+            "type": "string",
+            "maxLength": 63
+        },
+        "files": {
+            "type": "object"
+        }
+    },
+    "required": [
+        "project_id",
+        "name",
+        "slug",
+        "files"
+    ]
+}

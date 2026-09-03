@@ -1,105 +1,184 @@
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { ArrowLeft, Bot, ExternalLink, Globe } from 'lucide-react';
+import { Loader2, MessageSquare } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { StepsCollapse } from '@/components/prototype/panels';
-import { mockMessages, mockProjects, type ChatMessage } from '@/data/mock';
+import { attachAtomsHost, buildPreviewHtml } from '@/lib/engine';
+import { fetchShare, formatTime } from '@/lib/platform';
 
-function AgentAvatar() {
-  return (
-    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted">
-      <Bot className="h-3.5 w-3.5 text-muted-foreground" />
-    </span>
-  );
+interface SharedMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  model?: string;
+  createdAt?: number;
 }
 
-function ReadOnlyMessage({ message }: { message: ChatMessage }) {
-  if (message.role === 'system') {
-    return (
-      <div className="text-center text-xs text-muted-foreground">{message.content}</div>
-    );
-  }
-  if (message.role === 'user') {
-    return (
-      <div className="flex justify-end">
-        <div className="max-w-[80%] rounded-lg bg-primary px-3 py-2 leading-6 text-primary-foreground">
-          <p className="whitespace-pre-wrap text-sm">{message.content}</p>
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div
-      className={`flex gap-2.5 rounded-md ${
-        message.error ? 'border border-destructive/40 p-3' : ''
-      }`}
-    >
-      <AgentAvatar />
-      <div className="min-w-0 flex-1">
-        <div className="space-y-2 text-sm leading-6 text-foreground">
-          {message.content.split('\n').filter(Boolean).map((line, i) => (
-            <p key={i} className="whitespace-pre-wrap">
-              {line.replace(/^- /, '· ')}
-            </p>
-          ))}
-        </div>
-        {message.steps && message.steps.length > 0 && (
-          <StepsCollapse steps={message.steps} />
-        )}
-      </div>
-    </div>
-  );
+/** 去掉文件块，仅显示说明文字。 */
+function stripFileBlocks(content: string): string {
+  return content.replace(/<atoms-file path="[^"]+">[\s\S]*?<\/atoms-file>/g, '').trim();
 }
 
-// P6 分享只读页：展示构建过程对话 + 查看已发布应用入口
+function extractPaths(content: string): string[] {
+  const paths: string[] = [];
+  const pattern = /<atoms-file path="([^"]+)">/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(content)) !== null) paths.push(match[1]);
+  return paths;
+}
 
+/**
+ * 分享只读页 /share/:token：从云端读取分享快照，
+ * 左侧对话过程回放，右侧应用实时渲染（window.atoms 数据桥按原 project_id 隔离）。
+ */
 export default function ShareView() {
-  const { id } = useParams();
-  const project = mockProjects.find((p) => p.id === id) ?? mockProjects[1];
+  const { id } = useParams<{ id: string }>();
+  const [status, setStatus] = useState<'loading' | 'ready' | 'missing'>('loading');
+  const [data, setData] = useState<{
+    name: string;
+    createdAt?: string;
+    projectId: string;
+    messages: SharedMessage[];
+    files: Record<string, string>;
+  } | null>(null);
+
+  useEffect(() => attachAtomsHost(), []);
+
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    setStatus('loading');
+    fetchShare(id)
+      .then((res) => {
+        if (cancelled) return;
+        const snapshot = res.snapshot ?? {};
+        setData({
+          name: res.name,
+          createdAt: res.created_at,
+          projectId: res.project_id ?? '',
+          messages: Array.isArray(snapshot.messages) ? (snapshot.messages as SharedMessage[]) : [],
+          files: snapshot.files ?? {},
+        });
+        setStatus('ready');
+      })
+      .catch(() => {
+        if (!cancelled) setStatus('missing');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  const html = useMemo(() => {
+    if (!data) return null;
+    return buildPreviewHtml(data.files, data.projectId);
+  }, [data]);
+
+  const blobUrl = useMemo(() => {
+    if (!html) return null;
+    return URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+  }, [html]);
+
+  useEffect(() => {
+    return () => {
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+    };
+  }, [blobUrl]);
+
+  if (status === 'loading') {
+    return (
+      <div className="flex h-screen flex-col items-center justify-center gap-3 bg-background">
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+        <p className="text-sm text-muted-foreground">正在加载分享内容…</p>
+      </div>
+    );
+  }
+
+  if (status === 'missing' || !data) {
+    return (
+      <div className="flex h-screen flex-col items-center justify-center gap-4 bg-background">
+        <p className="text-lg font-medium text-foreground">分享链接不存在或已失效</p>
+        <p className="text-sm text-muted-foreground">请向分享者确认链接是否正确。</p>
+        <Button asChild variant="outline">
+          <Link to="/dashboard">前往工作台</Link>
+        </Button>
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-background font-sans">
-      <header className="sticky top-0 z-10 border-b border-border bg-background">
-        <div className="mx-auto flex h-12 max-w-3xl items-center justify-between px-4">
-          <div className="flex min-w-0 items-center gap-2">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-8 w-8 p-0 text-muted-foreground"
-              asChild
-            >
-              <Link to="/dashboard">
-                <ArrowLeft className="h-4 w-4" />
-              </Link>
-            </Button>
-            <span className="truncate text-sm font-medium text-foreground">
-              {project.name}
-            </span>
-            <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-              构建过程（只读）
-            </span>
-          </div>
-          {project.status === 'published' && (
-            <Button variant="secondary" size="sm" className="h-8 px-3 text-xs" asChild>
-              <Link to={`/p/${project.slug}`} target="_blank">
-                <ExternalLink className="h-3.5 w-3.5" />
-                查看已发布应用
-              </Link>
-            </Button>
-          )}
-        </div>
+    <div className="flex h-screen flex-col overflow-hidden bg-background">
+      <header className="flex h-12 shrink-0 items-center gap-3 border-b bg-card px-4">
+        <span className="text-sm font-semibold text-foreground">Atoms 克隆</span>
+        <span className="text-xs text-muted-foreground">分享 · 只读</span>
+        <h1 className="ml-2 min-w-0 truncate text-sm font-medium text-foreground">{data.name}</h1>
+        {data.createdAt && (
+          <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+            创建于 {formatTime(new Date(data.createdAt).getTime())}
+          </span>
+        )}
       </header>
 
-      <main className="mx-auto max-w-3xl px-4 py-6">
-        <div className="space-y-4">
-          {mockMessages.map((msg) => (
-            <ReadOnlyMessage key={msg.id} message={msg} />
-          ))}
-        </div>
-        <div className="mt-8 flex items-center justify-center gap-1 text-xs text-muted-foreground">
-          <Globe className="h-3.5 w-3.5" />
-          此页面为只读分享视图，内容由项目拥有者生成
-        </div>
-      </main>
+      <div className="flex min-h-0 flex-1">
+        {/* 对话回放 */}
+        <section className="flex w-[400px] shrink-0 flex-col border-r bg-card">
+          <div className="flex h-9 shrink-0 items-center gap-1.5 border-b px-3 text-xs text-muted-foreground">
+            <MessageSquare className="h-3.5 w-3.5" />
+            对话过程（{data.messages.length} 条）
+          </div>
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
+            {data.messages.map((message, index) => {
+              if (message.role === 'user') {
+                return (
+                  <div key={index} className="flex justify-end">
+                    <div className="max-w-[85%] whitespace-pre-wrap rounded-lg rounded-br-sm bg-primary px-3 py-2 text-sm leading-relaxed text-primary-foreground">
+                      {message.content}
+                    </div>
+                  </div>
+                );
+              }
+              const visible = stripFileBlocks(message.content);
+              const paths = extractPaths(message.content);
+              return (
+                <div key={index} className="flex justify-start">
+                  <div className="max-w-[90%] rounded-lg rounded-bl-sm border bg-accent px-3 py-2 text-sm leading-relaxed text-foreground">
+                    <p className="whitespace-pre-wrap">{visible || message.content}</p>
+                    {paths.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {paths.map((p) => (
+                          <span
+                            key={p}
+                            className="rounded bg-background px-1.5 py-0.5 font-mono text-xs text-muted-foreground"
+                          >
+                            {p}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {message.model && (
+                      <div className="mt-1.5 text-xs text-muted-foreground">{message.model}</div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        {/* 应用渲染 */}
+        <section className="min-w-0 flex-1">
+          {blobUrl ? (
+            <iframe
+              title={data.name}
+              src={blobUrl}
+              sandbox="allow-scripts allow-forms allow-modals allow-popups"
+              className="h-full w-full bg-white"
+            />
+          ) : (
+            <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+              该分享未包含可运行文件。
+            </div>
+          )}
+        </section>
+      </div>
     </div>
   );
 }

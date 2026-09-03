@@ -1,0 +1,25 @@
+{
+    "title": "AppRecords",
+    "type": "object",
+    "properties": {
+        "id": {
+            "type": "integer"
+        },
+        "project_id": {
+            "type": "string",
+            "maxLength": 64
+        },
+        "entity_type": {
+            "type": "string",
+            "maxLength": 64
+        },
+        "data": {
+            "type": "object"
+        }
+    },
+    "required": [
+        "project_id",
+        "entity_type",
+        "data"
+    ]
+}

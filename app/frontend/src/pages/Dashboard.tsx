@@ -1,284 +1,340 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
-import { CopyPlus, FolderOpen, LayoutTemplate, PenLine, Search, Trash2 } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
-import { AppSidebar } from '@/components/prototype/sidebar';
 import {
-  DeleteDialog,
-  OnboardingDialog,
-  RemixDialog,
-  TemplateDialog,
-  readOnboardingDone,
-} from '@/components/prototype/dialogs';
-import { mockProjects, type MockProject } from '@/data/mock';
+  BookOpen,
+  Copy,
+  FileCode2,
+  Globe,
+  MessageSquare,
+  Plus,
+  Rocket,
+  Sparkles,
+  Trash2,
+} from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { AppSidebar } from '@/components/prototype/sidebar';
+import { TEMPLATES, formatTime } from '@/lib/platform';
+import { useProjectStore } from '@/store/projects';
 
-type DialogKind = 'template' | 'remix' | 'delete' | null;
-
-function StatusBadge({ status }: { status: MockProject['status'] }) {
-  return (
-    <span
-      className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs ${
-        status === 'published'
-          ? 'bg-secondary text-secondary-foreground'
-          : 'bg-muted text-muted-foreground'
-      }`}
-    >
-      {status === 'published' ? '已发布' : '开发中'}
-    </span>
-  );
-}
-
+/**
+ * 工作台：真实项目列表（zustand + localStorage 持久化），
+ * 支持创建（官方模板）、Remix 复制与删除。
+ */
 export default function Dashboard() {
   const navigate = useNavigate();
-  const [projects, setProjects] = useState<MockProject[]>(mockProjects);
-  const [search, setSearch] = useState('');
-  const [idea, setIdea] = useState('');
-  const [activeDialog, setActiveDialog] = useState<DialogKind>(null);
-  const [deleteTarget, setDeleteTarget] = useState<MockProject | null>(null);
-  const [onboardingOpen, setOnboardingOpen] = useState(() => !readOnboardingDone());
+  const projects = useProjectStore((s) => s.projects);
+  const createProject = useProjectStore((s) => s.createProject);
+  const remixProject = useProjectStore((s) => s.remixProject);
+  const deleteProject = useProjectStore((s) => s.deleteProject);
 
-  const filtered = useMemo(() => {
-    const keyword = search.trim().toLowerCase();
-    if (!keyword) return projects;
-    return projects.filter(
-      (p) =>
-        p.name.toLowerCase().includes(keyword) ||
-        p.description.toLowerCase().includes(keyword),
-    );
-  }, [projects, search]);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [templatesOpen, setTemplatesOpen] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
+  const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [newName, setNewName] = useState('');
+  const [newTemplateId, setNewTemplateId] = useState(TEMPLATES[0].id);
 
-  const openProject = (id: string) => {
-    navigate(`/project/${id}`);
+  const deleteTarget = useMemo(
+    () => projects.find((p) => p.id === deleteId) ?? null,
+    [projects, deleteId],
+  );
+
+  const openProject = (id: string) => navigate(`/project/${id}`);
+
+  const handleCreate = () => {
+    const project = createProject(newName || '未命名项目', newTemplateId);
+    setCreateOpen(false);
+    setNewName('');
+    toast.success('项目已创建');
+    openProject(project.id);
   };
 
-  const handleStartBuild = () => {
-    if (!idea.trim()) return;
-    toast('已收到你的想法，进入工作区演示');
-    openProject('p1');
+  const handleUseTemplate = (templateId: string, name: string) => {
+    const project = createProject(name, templateId);
+    setTemplatesOpen(false);
+    toast.success(`已从模板「${name}」创建项目`);
+    openProject(project.id);
   };
 
-  const handleUseTemplate = (templateName: string) => {
-    setActiveDialog(null);
-    toast(`已从「${templateName}」模板创建项目`);
-    openProject('p1');
-  };
-
-  const handleRemix = (project: MockProject) => {
-    setActiveDialog(null);
-    toast(`已复制「${project.name}」为新项目`);
-    openProject('p1');
+  const handleRemix = (id: string) => {
+    const copy = remixProject(id);
+    if (!copy) {
+      toast.error('复制失败，请重试');
+      return;
+    }
+    toast.success('已创建项目副本');
+    openProject(copy.id);
   };
 
   const handleConfirmDelete = () => {
-    if (!deleteTarget) return;
-    setProjects((prev) => prev.filter((p) => p.id !== deleteTarget.id));
-    toast('已删除');
-    setDeleteTarget(null);
-    setActiveDialog(null);
+    if (!deleteId) return;
+    deleteProject(deleteId);
+    setDeleteId(null);
+    toast.success('项目已删除');
   };
 
-  const handleHelp = () => {
-    toast('帮助中心将在开发阶段接入');
+  const copyLink = async (path: string) => {
+    try {
+      await navigator.clipboard.writeText(`${window.location.origin}${path}`);
+      toast.success('链接已复制');
+    } catch {
+      toast.error('复制失败，请手动复制');
+    }
   };
 
   return (
-    <div className="flex min-h-screen bg-background font-sans">
-      {/* 左侧菜单栏（2026-09-02 用户要求增加，覆盖原顶部导航设计） */}
+    <div className="flex h-screen overflow-hidden bg-background">
       <AppSidebar
-        onOpenTemplates={() => setActiveDialog('template')}
-        onOpenGuide={() => setOnboardingOpen(true)}
-        onHelp={handleHelp}
+        onOpenTemplates={() => setTemplatesOpen(true)}
+        onOpenGuide={() => setGuideOpen(true)}
+        onHelp={() => setGuideOpen(true)}
       />
 
-      {/* 主内容区 */}
-      <main className="mx-auto min-w-0 flex-1 px-4 sm:px-6">
-        {/* 欢迎区 */}
-        <section className="mx-auto max-w-3xl pt-16 text-center">
-          <h1 className="text-2xl font-semibold text-foreground">把想法变成产品</h1>
-          <p className="mt-2 text-sm text-muted-foreground">
-            描述你的想法，AI 团队几分钟内完成构建
-          </p>
-          <div className="mt-6 rounded-lg border border-input bg-card p-3 text-left shadow-sm">
-            <Textarea
-              value={idea}
-              onChange={(e) => setIdea(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  handleStartBuild();
-                }
-              }}
-              placeholder="描述你想做的应用…"
-              className="min-h-[60px] resize-none border-0 bg-transparent p-2 text-sm shadow-none focus-visible:ring-0"
-            />
-            <div className="flex justify-end p-1">
-              <Button size="sm" disabled={!idea.trim()} onClick={handleStartBuild}>
-                开始
-              </Button>
+      <main className="flex min-w-0 flex-1 flex-col overflow-y-auto">
+        <div className="mx-auto w-full max-w-5xl px-8 py-10">
+          {/* 标题区 */}
+          <div className="mb-8 flex items-start justify-between">
+            <div>
+              <h1 className="text-2xl font-semibold text-foreground">工作台</h1>
+              <p className="mt-1 text-sm text-muted-foreground">
+                通过对话创建应用，预览、发布并分享，全部在浏览器中完成。
+              </p>
             </div>
-          </div>
-        </section>
-
-        {/* 快捷起点 */}
-        <section className="mx-auto mt-8 grid max-w-3xl grid-cols-1 gap-4 sm:grid-cols-3">
-          <button
-            type="button"
-            onClick={() => setActiveDialog('template')}
-            className="flex items-start gap-3 rounded-lg border border-border bg-card p-4 text-left shadow-sm transition-colors hover:bg-accent"
-          >
-            <span className="rounded-md bg-muted p-2 text-foreground">
-              <LayoutTemplate className="h-4 w-4" />
-            </span>
-            <span>
-              <span className="block text-sm font-medium text-foreground">内置模板</span>
-              <span className="mt-0.5 block text-xs text-muted-foreground">
-                从官方模板快速起步
-              </span>
-            </span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveDialog('remix')}
-            className="flex items-start gap-3 rounded-lg border border-border bg-card p-4 text-left shadow-sm transition-colors hover:bg-accent"
-          >
-            <span className="rounded-md bg-muted p-2 text-foreground">
-              <CopyPlus className="h-4 w-4" />
-            </span>
-            <span>
-              <span className="block text-sm font-medium text-foreground">复制现有项目</span>
-              <span className="mt-0.5 block text-xs text-muted-foreground">
-                基于已有项目继续开发
-              </span>
-            </span>
-          </button>
-          <button
-            type="button"
-            onClick={() => openProject('p1')}
-            className="flex items-start gap-3 rounded-lg border border-border bg-card p-4 text-left shadow-sm transition-colors hover:bg-accent"
-          >
-            <span className="rounded-md bg-muted p-2 text-foreground">
-              <PenLine className="h-4 w-4" />
-            </span>
-            <span>
-              <span className="block text-sm font-medium text-foreground">空白新建</span>
-              <span className="mt-0.5 block text-xs text-muted-foreground">
-                从一次对话开始构建
-              </span>
-            </span>
-          </button>
-        </section>
-
-        {/* 我的项目 */}
-        <section className="mt-12 pb-16">
-          <div className="flex items-center justify-between gap-4">
-            <h2 className="text-base font-semibold text-foreground">我的项目</h2>
-            <div className="relative w-64">
-              <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="搜索项目"
-                className="pl-8 text-sm"
-              />
-            </div>
+            <Button onClick={() => setCreateOpen(true)} className="gap-1.5">
+              <Plus className="h-4 w-4" />
+              新建项目
+            </Button>
           </div>
 
-          {filtered.length > 0 ? (
-            <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {filtered.map((project) => (
+          {/* 项目列表 */}
+          {projects.length === 0 ? (
+            <div className="flex flex-col items-center rounded-lg border border-dashed bg-card px-8 py-20 text-center">
+              <Sparkles className="mb-4 h-10 w-10 text-muted-foreground" />
+              <h2 className="text-lg font-medium text-foreground">还没有项目</h2>
+              <p className="mt-1 max-w-md text-sm text-muted-foreground">
+                从空白开始或使用官方模板创建你的第一个应用：描述想法，AI
+                会生成可运行的单页应用，可实时预览并一键发布分享。
+              </p>
+              <div className="mt-6 flex gap-3">
+                <Button onClick={() => setCreateOpen(true)} className="gap-1.5">
+                  <Plus className="h-4 w-4" />
+                  新建项目
+                </Button>
+                <Button variant="outline" onClick={() => setTemplatesOpen(true)}>
+                  浏览模板
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {projects.map((project) => (
                 <div
                   key={project.id}
-                  className="group rounded-lg border border-border bg-card p-4 shadow-sm transition-colors hover:bg-accent"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => openProject(project.id)}
+                  onKeyDown={(e) => e.key === 'Enter' && openProject(project.id)}
+                  className="group flex cursor-pointer flex-col rounded-lg border bg-card p-4 shadow-xs transition-all hover:border-foreground/25 hover:shadow-sm"
                 >
                   <div className="flex items-start justify-between gap-2">
-                    <p className="truncate text-sm font-medium text-foreground">
+                    <h3 className="line-clamp-1 text-sm font-medium text-foreground">
                       {project.name}
-                    </p>
-                    <StatusBadge status={project.status} />
+                    </h3>
+                    {project.publishedSlug && (
+                      <Badge variant="secondary" className="shrink-0 gap-1 text-xs">
+                        <Globe className="h-3 w-3" />
+                        已发布
+                      </Badge>
+                    )}
                   </div>
-                  <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">
-                    {project.description}
-                  </p>
-                  <div className="mt-4 flex items-center justify-between">
-                    <span className="text-xs text-muted-foreground">
-                      更新于 {project.updatedAt}
+
+                  <div className="mt-3 flex items-center gap-4 text-xs text-muted-foreground">
+                    <span className="flex items-center gap-1">
+                      <FileCode2 className="h-3.5 w-3.5" />
+                      {project.files.length} 个文件
                     </span>
-                    <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                    <span className="flex items-center gap-1">
+                      <MessageSquare className="h-3.5 w-3.5" />
+                      {project.messages.length} 条对话
+                    </span>
+                  </div>
+
+                  {project.publishedSlug && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void copyLink(`/p/${project.publishedSlug}`);
+                      }}
+                      className="mt-2 flex w-fit items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+                    >
+                      <Copy className="h-3 w-3" />
+                      复制发布链接
+                    </button>
+                  )}
+
+                  <div className="mt-4 flex items-center justify-between border-t pt-3">
+                    <span className="text-xs text-muted-foreground">
+                      更新于 {formatTime(project.updatedAt)}
+                    </span>
+                    <div className="flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
                       <Button
-                        variant="secondary"
+                        variant="ghost"
                         size="sm"
-                        className="h-7 px-2 text-xs"
-                        onClick={() => openProject(project.id)}
+                        className="h-7 gap-1 px-2 text-xs"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRemix(project.id);
+                        }}
                       >
-                        <FolderOpen className="h-3.5 w-3.5" />
-                        打开
+                        复制
                       </Button>
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-7 px-2 text-xs text-destructive hover:text-destructive"
-                        onClick={() => {
-                          setDeleteTarget(project);
-                          setActiveDialog('delete');
+                        className="h-7 gap-1 px-2 text-xs text-destructive hover:text-destructive"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDeleteId(project.id);
                         }}
                       >
                         <Trash2 className="h-3.5 w-3.5" />
-                        删除
                       </Button>
                     </div>
                   </div>
                 </div>
               ))}
             </div>
-          ) : (
-            <div className="mt-4 flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-muted/50 p-10 text-center">
-              <span className="rounded-full bg-muted p-3 text-muted-foreground">
-                <LayoutTemplate className="h-6 w-6" />
-              </span>
-              <p className="mt-3 text-sm font-medium text-foreground">
-                {projects.length === 0 ? '还没有项目' : '未找到匹配的项目'}
-              </p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {projects.length === 0
-                  ? '从上方选择一种方式开始'
-                  : '换个关键词试试，或清空搜索查看全部项目'}
-              </p>
-              {projects.length === 0 && (
-                <Button size="sm" className="mt-4" onClick={() => setActiveDialog('template')}>
-                  新建项目
-                </Button>
-              )}
-            </div>
           )}
-        </section>
+        </div>
       </main>
 
-      {/* 弹窗 */}
-      <TemplateDialog
-        open={activeDialog === 'template'}
-        onOpenChange={(open) => setActiveDialog(open ? 'template' : null)}
-        onUse={handleUseTemplate}
-      />
-      <RemixDialog
-        open={activeDialog === 'remix'}
-        onOpenChange={(open) => setActiveDialog(open ? 'remix' : null)}
-        onUse={handleRemix}
-      />
-      <DeleteDialog
-        open={activeDialog === 'delete' && !!deleteTarget}
-        onOpenChange={(open) => {
-          if (!open) {
-            setActiveDialog(null);
-            setDeleteTarget(null);
-          }
-        }}
-        projectName={deleteTarget?.name ?? ''}
-        onConfirm={handleConfirmDelete}
-      />
-      <OnboardingDialog open={onboardingOpen} onOpenChange={setOnboardingOpen} />
+      {/* 新建项目弹窗 */}
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>新建项目</DialogTitle>
+            <DialogDescription>选择一个起点，之后可在工作区中通过对话继续开发。</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <Input
+              placeholder="项目名称（可留空，默认「未命名项目」）"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+            />
+            <div className="grid grid-cols-2 gap-2">
+              {TEMPLATES.map((template) => (
+                <button
+                  key={template.id}
+                  type="button"
+                  onClick={() => setNewTemplateId(template.id)}
+                  className={`rounded-lg border p-3 text-left transition-colors ${
+                    newTemplateId === template.id
+                      ? 'border-foreground/40 bg-accent'
+                      : 'bg-card hover:bg-accent/60'
+                  }`}
+                >
+                  <div className="text-lg">{template.emoji}</div>
+                  <div className="mt-1 text-sm font-medium text-foreground">{template.name}</div>
+                  <div className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+                    {template.description}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCreateOpen(false)}>
+              取消
+            </Button>
+            <Button onClick={handleCreate}>创建项目</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 模板库弹窗 */}
+      <Dialog open={templatesOpen} onOpenChange={setTemplatesOpen}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>官方模板</DialogTitle>
+            <DialogDescription>使用模板快速创建项目，创建后可自由修改。</DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-1 gap-3 py-2 sm:grid-cols-2">
+            {TEMPLATES.map((template) => (
+              <div key={template.id} className="rounded-lg border bg-card p-4">
+                <div className="flex items-center gap-2">
+                  <span className="text-xl">{template.emoji}</span>
+                  <h3 className="text-sm font-medium text-foreground">{template.name}</h3>
+                </div>
+                <p className="mt-1.5 min-h-[32px] text-xs leading-relaxed text-muted-foreground">
+                  {template.description}
+                </p>
+                <Button
+                  size="sm"
+                  className="mt-3 w-full gap-1"
+                  onClick={() => handleUseTemplate(template.id, template.name)}
+                >
+                  <Rocket className="h-3.5 w-3.5" />
+                  使用模板
+                </Button>
+              </div>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 使用指引弹窗 */}
+      <Dialog open={guideOpen} onOpenChange={setGuideOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <BookOpen className="h-4 w-4" />
+              使用指引
+            </DialogTitle>
+          </DialogHeader>
+          <ol className="list-decimal space-y-2 pl-5 text-sm text-foreground">
+            <li>创建项目：选择空白或官方模板作为起点。</li>
+            <li>对话生成：用自然语言描述应用，AI 会流式生成完整代码文件。</li>
+            <li>实时预览：生成完成后自动刷新预览，可随时切换到编辑器手动修改。</li>
+            <li>发布与分享：发布后获得固定访问链接，也可将项目过程生成只读分享页。</li>
+          </ol>
+          <p className="mt-3 rounded-md bg-accent px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+            说明：项目数据保存在当前浏览器中；发布与分享后的内容保存在云端，可通过链接公开访问。生成应用内可使用
+            window.atoms.data 接口保存业务数据。
+          </p>
+        </DialogContent>
+      </Dialog>
+
+      {/* 删除确认弹窗 */}
+      <Dialog open={deleteId !== null} onOpenChange={(open) => !open && setDeleteId(null)}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>删除项目</DialogTitle>
+            <DialogDescription>
+              确定要删除「{deleteTarget?.name}」吗？此操作不可撤销，已发布链接将不受影响。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteId(null)}>
+              取消
+            </Button>
+            <Button variant="destructive" onClick={handleConfirmDelete}>
+              删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

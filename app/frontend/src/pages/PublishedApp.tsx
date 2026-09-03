@@ -1,85 +1,93 @@
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { Globe } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { PLATFORM_DOMAIN, mockProjects } from '@/data/mock';
+import { attachAtomsHost, buildPreviewHtml } from '@/lib/engine';
+import { fetchPublished } from '@/lib/platform';
 
-// P5 已发布应用访问页：仅渲染应用本体，无平台框架/顶栏
-
-function BoardApp() {
-  return (
-    <div className="min-h-screen bg-background font-sans">
-      <div className="border-b border-border px-6 py-4">
-        <h1 className="text-xl font-semibold text-foreground">团队工作台</h1>
-      </div>
-      <main className="mx-auto max-w-5xl space-y-6 p-6">
-        <div className="grid grid-cols-3 gap-4">
-          {[
-            ['今日待办', '5'],
-            ['进行中', '3'],
-            ['已完成', '12'],
-          ].map(([label, value]) => (
-            <div key={label} className="rounded-lg border border-border bg-card p-4 shadow-sm">
-              <p className="text-2xl font-semibold text-foreground">{value}</p>
-              <p className="text-xs text-muted-foreground">{label}</p>
-            </div>
-          ))}
-        </div>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          {[
-            ['待办', ['设计登录页', '整理需求清单', '准备评审材料']],
-            ['进行中', ['开发看板组件', '接入本地存储']],
-            ['已完成', ['初始化项目', '搭建基础布局', '统一视觉风格']],
-          ].map(([title, items]) => (
-            <section
-              key={title as string}
-              className="rounded-lg border border-border bg-card p-4 shadow-sm"
-            >
-              <h2 className="text-sm font-medium text-foreground">{title as string}</h2>
-              <div className="mt-3 space-y-2">
-                {(items as string[]).map((item) => (
-                  <div
-                    key={item}
-                    className="rounded-md bg-muted px-3 py-2 text-sm text-foreground"
-                  >
-                    {item}
-                  </div>
-                ))}
-              </div>
-            </section>
-          ))}
-        </div>
-      </main>
-    </div>
-  );
-}
-
+/**
+ * 已发布应用页 /p/:slug：从云端读取发布快照，
+ * 以 iframe blob 渲染，并挂载 window.atoms 数据桥（按原 project_id 隔离）。
+ */
 export default function PublishedApp() {
-  const { slug } = useParams();
-  const exists = mockProjects.some((p) => p.slug === slug);
+  const { slug } = useParams<{ slug: string }>();
+  const [status, setStatus] = useState<'loading' | 'ready' | 'missing'>('loading');
+  const [snapshot, setSnapshot] = useState<{
+    name: string;
+    projectId: string;
+    html: string;
+  } | null>(null);
 
-  if (!exists) {
+  useEffect(() => attachAtomsHost(), []);
+
+  useEffect(() => {
+    if (!slug) return;
+    let cancelled = false;
+    setStatus('loading');
+    fetchPublished(slug)
+      .then((data) => {
+        if (cancelled) return;
+        const html = buildPreviewHtml(data.files ?? {}, data.project_id);
+        if (!html) {
+          setStatus('missing');
+          return;
+        }
+        setSnapshot({ name: data.name, projectId: data.project_id, html });
+        setStatus('ready');
+        if (data.name) document.title = `${data.name}`;
+      })
+      .catch(() => {
+        if (!cancelled) setStatus('missing');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [slug]);
+
+  const blobUrl = useMemo(() => {
+    if (!snapshot) return null;
+    return URL.createObjectURL(new Blob([snapshot.html], { type: 'text/html' }));
+  }, [snapshot]);
+
+  useEffect(() => {
+    return () => {
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+    };
+  }, [blobUrl]);
+
+  if (status === 'loading') {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-background font-sans">
-        <div className="w-full max-w-sm rounded-lg border border-border bg-card p-8 text-center shadow-sm">
-          <span className="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-muted text-muted-foreground">
-            <Globe className="h-5 w-5" />
-          </span>
-          <h1 className="mt-4 text-base font-semibold text-foreground">
-            链接不存在或已被删除
-          </h1>
-          <p className="mt-1 text-xs text-muted-foreground">
-            请确认链接是否正确，或联系分享者重新获取
-          </p>
-          <Button asChild className="mt-5">
-            <Link to="/dashboard">访问平台</Link>
-          </Button>
-        </div>
+      <div className="flex h-screen flex-col items-center justify-center gap-3 bg-background">
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+        <p className="text-sm text-muted-foreground">正在加载应用…</p>
       </div>
     );
   }
 
-  return <BoardApp />;
-}
+  if (status === 'missing' || !blobUrl) {
+    return (
+      <div className="flex h-screen flex-col items-center justify-center gap-4 bg-background">
+        <p className="text-lg font-medium text-foreground">应用不存在或已被删除</p>
+        <p className="text-sm text-muted-foreground">请检查链接是否正确。</p>
+        <Button asChild variant="outline">
+          <Link to="/dashboard">前往工作台</Link>
+        </Button>
+      </div>
+    );
+  }
 
-// 供路由演示的 slug 提示（开发注释，不渲染）
-export const DEMO_SLUG_NOTE = `${PLATFORM_DOMAIN}/p/saas-landing 或 /p/my-blog`;
+  return (
+    <div className="flex h-screen flex-col overflow-hidden bg-background">
+      <header className="flex h-10 shrink-0 items-center justify-between border-b bg-card px-4">
+        <span className="truncate text-xs font-medium text-foreground">{snapshot?.name}</span>
+        <span className="shrink-0 font-mono text-xs text-muted-foreground">/p/{slug}</span>
+      </header>
+      <iframe
+        title={snapshot?.name || '已发布应用'}
+        src={blobUrl}
+        sandbox="allow-scripts allow-forms allow-modals allow-popups"
+        className="min-h-0 w-full flex-1 bg-white"
+      />
+    </div>
+  );
+}
