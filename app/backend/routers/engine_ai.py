@@ -19,6 +19,26 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/engine", tags=["engine-ai"])
 
+# HTML 防护页特征（如 Cloudflare「Just a moment...」人机验证页）
+_CHALLENGE_HINTS = ("just a moment", "attention required", "cf-mitigated", "challenge", "cloudflare")
+
+
+def friendly_error_message(error: Exception) -> str:
+    """Convert an upstream error into a concise, user-friendly message.
+
+    HTML bodies (e.g. Cloudflare challenge pages) must never be passed through
+    to the client; they are replaced with a friendly Chinese message instead.
+    """
+    detail = extract_error_message(error).strip()
+    if not detail:
+        return "AI 服务暂时不可用，请稍后重试"
+    lowered = detail.lower()
+    if "<html" in lowered or any(hint in lowered for hint in _CHALLENGE_HINTS):
+        return "AI 上游服务被网络防护临时拦截，请稍后重试"
+    if len(detail) > 300:
+        detail = detail[:300].rstrip() + "…"
+    return detail
+
 
 @router.post("/gentxt")
 async def generate_text(request: GenTxtRequest):
@@ -41,7 +61,7 @@ async def generate_text(request: GenTxtRequest):
                         yield json.dumps({"content": content})
                 except Exception as e:
                     logger.error(f"Engine stream error: {e}")
-                    yield json.dumps({"content": f"[ERROR] {extract_error_message(e)}"})
+                    yield json.dumps({"content": f"[ERROR] {friendly_error_message(e)}"})
                 finally:
                     yield "[DONE]"
 
@@ -52,10 +72,10 @@ async def generate_text(request: GenTxtRequest):
 
     except ValueError as e:
         logger.error(f"AI service configuration error: {e}")
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=extract_error_message(e)) from e
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=friendly_error_message(e)) from e
     except Exception as e:
         logger.error(f"Engine text generation failed: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=extract_error_message(e),
+            detail=friendly_error_message(e),
         ) from e

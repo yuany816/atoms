@@ -103,12 +103,67 @@ async function consumeSseStream(
   }
 }
 
+// ---------- 网关防护页识别、端点回退与自动重试 ----------
+
+/** 需要自动重试的瞬态 HTTP 状态码（网关拦截/限流/上游抖动） */
+const RETRYABLE_STATUS = new Set([403, 408, 429, 500, 502, 503, 504]);
+/** 单次生成的最大尝试次数（含首次） */
+const MAX_ATTEMPTS = 3;
+/** Cloudflare 等网关防护页（如「Just a moment...」人机验证）特征 */
+const CHALLENGE_HINT = /just a moment|attention required|cf-mitigated|challenge-platform|cloudflare/i;
+/** 生成端点：优先应用自有引擎路由，部署快照未包含该路由（404）时回退到平台 AI Hub 保留路径 */
+const PRIMARY_ENDPOINT = '/api/v1/engine/gentxt';
+const FALLBACK_ENDPOINT = '/api/v1/aihub/gentxt';
+
+const delay = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
+
+/** 从失败响应提取可读错误：JSON 取 detail/message；HTML 防护页转译为友好中文，不透传原始 HTML。 */
+async function readFriendlyError(response: Response): Promise<string> {
+  let text = '';
+  try {
+    text = await response.text();
+  } catch {
+    return ''; // 错误体读取失败
+  }
+  const trimmed = text.trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('{')) {
+    try {
+      const data = JSON.parse(trimmed) as { detail?: string; message?: string };
+      return (data.detail || data.message || '').slice(0, 300);
+    } catch {
+      // 非 JSON 响应体，继续按文本处理
+    }
+  }
+  if (trimmed.startsWith('<')) {
+    return CHALLENGE_HINT.test(trimmed) ? '请求被网络防护临时拦截，请稍后重试' : '服务返回了异常页面，请稍后重试';
+  }
+  return trimmed.slice(0, 200);
+}
+
+/** 识别「状态码 200 但实为 HTML 防护页」的伪成功响应（部分挑战页以 200 返回）。 */
+async function readChallengeError(response: Response): Promise<string | null> {
+  const contentType = (response.headers.get('content-type') || '').toLowerCase();
+  if (!contentType.includes('text/html')) return null;
+  let text = '';
+  try {
+    text = await response.text();
+  } catch {
+    return '服务返回了异常页面，请稍后重试';
+  }
+  return CHALLENGE_HINT.test(text) ? '请求被网络防护临时拦截，请稍后重试' : '服务返回了异常页面，请稍后重试';
+}
+
 /**
- * 调用真实文本模型流式生成。禁止任何模拟回复；失败时抛错由调用方处理。
+ * 调用真实文本模型流式生成。禁止任何模拟回复；失败时抛出友好中文错误。
  *
- * 说明：部署环境中 /api/v1/aihub/* 是平台保留路径，匿名请求会被平台网关
- * 拒绝（HTTP 403），因此这里改走应用自有后端的 /api/v1/engine/gentxt，
- * 由后端直接调用 AIHubService 并以相同的 SSE 协议返回。
+ * 说明：
+ * - 部署环境中 /api/v1/aihub/* 是平台保留路径，匿名请求可能被平台网关拒绝，
+ *   因此优先走应用自有后端的 /api/v1/engine/gentxt，由后端调用 AIHubService
+ *   并以相同的 SSE 协议返回；若部署快照尚未包含该路由（404）则回退到 aihub。
+ * - 公网入口存在间歇性网关防护拦截（403 挑战页，同一请求时通时不通），
+ *   这里对瞬态失败（403/408/429/5xx、网络错误、HTML 防护页）自动重试，
+ *   重试耗尽后抛出友好中文提示，绝不把原始 HTML 透传给用户。
  */
 export function streamGenerate(opts: {
   messages: GenMessage[];
@@ -119,9 +174,10 @@ export function streamGenerate(opts: {
     void (async () => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 600_000);
-      try {
-        const response = (await client.apiCall.invoke({
-          url: '/api/v1/engine/gentxt',
+
+      const invokeOnce = (url: string) =>
+        client.apiCall.invoke({
+          url,
           method: 'POST',
           data: {
             messages: opts.messages.map((m) => ({ role: m.role, content: m.content })),
@@ -129,25 +185,56 @@ export function streamGenerate(opts: {
             stream: true,
           },
           options: { responseType: 'stream' },
-        })) as unknown as Response;
+        }) as unknown as Promise<Response>;
 
-        if (!response.ok) {
-          let detail = '';
+      try {
+        let endpoint = PRIMARY_ENDPOINT;
+        let lastError = '';
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+          let response: Response;
           try {
-            const text = await response.text();
-            try {
-              const data = JSON.parse(text) as { detail?: string; message?: string };
-              detail = data.detail || data.message || '';
-            } catch {
-              detail = text.slice(0, 200);
-            }
+            response = await invokeOnce(endpoint);
           } catch {
-            // 忽略错误体读取失败
+            lastError = '网络连接异常，请稍后重试';
+            if (attempt < MAX_ATTEMPTS) {
+              await delay(600 * attempt);
+              continue;
+            }
+            throw new Error(lastError);
           }
-          throw new Error(`HTTP ${response.status}${detail ? `：${detail}` : ''}`);
-        }
 
-        resolve(await consumeSseStream(response, { onChunk: opts.onChunk, signal: controller.signal }));
+          if (!response.ok) {
+            lastError = `HTTP ${response.status}：${await readFriendlyError(response)}`;
+            // 部署快照可能尚未包含自有引擎路由：404 时切换端点且不消耗重试次数
+            if (response.status === 404 && endpoint === PRIMARY_ENDPOINT) {
+              endpoint = FALLBACK_ENDPOINT;
+              attempt -= 1;
+              continue;
+            }
+            if (RETRYABLE_STATUS.has(response.status) && attempt < MAX_ATTEMPTS) {
+              await delay(600 * attempt);
+              continue;
+            }
+            throw new Error(lastError);
+          }
+
+          // 状态码成功但返回的是 HTML 防护页：按失败处理
+          const challengeError = await readChallengeError(response);
+          if (challengeError) {
+            lastError = challengeError;
+            if (attempt < MAX_ATTEMPTS) {
+              await delay(600 * attempt);
+              continue;
+            }
+            throw new Error(lastError);
+          }
+
+          resolve(
+            await consumeSseStream(response, { onChunk: opts.onChunk, signal: controller.signal }),
+          );
+          return;
+        }
+        throw new Error(lastError || 'AI 生成失败，请稍后重试');
       } catch (error) {
         if (controller.signal.aborted) {
           reject(new Error('AI 生成超时，请稍后重试'));
