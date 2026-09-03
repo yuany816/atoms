@@ -242,7 +242,7 @@ export default function ProjectWorkspace() {
       const detail = getErrorDetail(e) || 'AI 生成失败，请稍后重试';
       patchMessage(projectId, assistantId, { content: `生成失败：${detail}`, error: true });
       appendLog(projectId, `生成失败: ${detail}`, 'error');
-      toast({ title: '生成失败', description: detail, variant: 'destructive' });
+      toast.error(`生成失败：${detail}`);
     } finally {
       setGenerating(false);
     }

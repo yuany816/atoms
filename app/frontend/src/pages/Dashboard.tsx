@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import {
@@ -44,6 +44,15 @@ export default function Dashboard() {
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [newName, setNewName] = useState('');
   const [newTemplateId, setNewTemplateId] = useState(TEMPLATES[0].id);
+
+  // 首次进入自动弹出新手指引（localStorage 标记，仅提示一次）
+  useEffect(() => {
+    const key = 'atoms-clone-guide-seen';
+    if (!window.localStorage.getItem(key)) {
+      setGuideOpen(true);
+      window.localStorage.setItem(key, '1');
+    }
+  }, []);
 
   const deleteTarget = useMemo(
     () => projects.find((p) => p.id === deleteId) ?? null,
