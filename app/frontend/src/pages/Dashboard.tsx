@@ -1,18 +1,11 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
-import {
-  CopyPlus,
-  FolderOpen,
-  HelpCircle,
-  LayoutTemplate,
-  PenLine,
-  Search,
-  Trash2,
-} from 'lucide-react';
+import { CopyPlus, FolderOpen, LayoutTemplate, PenLine, Search, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
+import { AppSidebar } from '@/components/prototype/sidebar';
 import {
   DeleteDialog,
   OnboardingDialog,
@@ -87,45 +80,21 @@ export default function Dashboard() {
     setActiveDialog(null);
   };
 
-  return (
-    <div className="min-h-screen bg-background font-sans">
-      {/* 顶部导航 */}
-      <header className="border-b border-border">
-        <div className="mx-auto flex h-12 max-w-6xl items-center justify-between px-4 sm:px-6">
-          <div className="flex items-center gap-6">
-            <span className="text-sm font-semibold text-foreground">Atoms 克隆</span>
-            <nav className="flex items-center gap-1">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="text-muted-foreground"
-                onClick={() => setActiveDialog('template')}
-              >
-                模板
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="text-muted-foreground"
-                onClick={() => setOnboardingOpen(true)}
-              >
-                使用指引
-              </Button>
-            </nav>
-          </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="text-muted-foreground"
-            onClick={() => toast('帮助中心将在开发阶段接入')}
-          >
-            <HelpCircle className="h-4 w-4" />
-            帮助
-          </Button>
-        </div>
-      </header>
+  const handleHelp = () => {
+    toast('帮助中心将在开发阶段接入');
+  };
 
-      <main className="mx-auto max-w-6xl px-4 sm:px-6">
+  return (
+    <div className="flex min-h-screen bg-background font-sans">
+      {/* 左侧菜单栏（2026-09-02 用户要求增加，覆盖原顶部导航设计） */}
+      <AppSidebar
+        onOpenTemplates={() => setActiveDialog('template')}
+        onOpenGuide={() => setOnboardingOpen(true)}
+        onHelp={handleHelp}
+      />
+
+      {/* 主内容区 */}
+      <main className="mx-auto min-w-0 flex-1 px-4 sm:px-6">
         {/* 欢迎区 */}
         <section className="mx-auto max-w-3xl pt-16 text-center">
           <h1 className="text-2xl font-semibold text-foreground">把想法变成产品</h1>
