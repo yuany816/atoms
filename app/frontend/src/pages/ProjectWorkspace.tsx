@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ChangeEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import {
@@ -88,7 +88,7 @@ export default function ProjectWorkspace() {
   const [model, setModel] = useState<string>(DEFAULT_MODEL);
   const [input, setInput] = useState('');
   const [generating, setGenerating] = useState(false);
-  const [tab, setTab] = useState('chat-preview');
+  const [tab, setTab] = useState('preview');
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [editorDraft, setEditorDraft] = useState('');
   const [previewNonce, setPreviewNonce] = useState(0);
