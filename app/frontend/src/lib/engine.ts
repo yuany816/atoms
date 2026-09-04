@@ -114,6 +114,16 @@ const CHALLENGE_HINT = /just a moment|attention required|cf-mitigated|challenge-
 /** 生成端点：优先应用自有引擎路由，部署快照未包含该路由（404）时回退到平台 AI Hub 保留路径 */
 const PRIMARY_ENDPOINT = '/api/v1/engine/gentxt';
 const FALLBACK_ENDPOINT = '/api/v1/aihub/gentxt';
+/**
+ * 末级跨域回退后端基址：部署域名（*.pub.atoms.world）的 AI 接口可能被平台边缘防护
+ * （Cloudflare 托管挑战）会话级拦截，而预览后端公网可达且已放行跨域
+ * （实测预检 204 + Access-Control-Allow-Origin: *，跨域 POST SSE 200）。
+ * 同源链路被防护拦截且重试耗尽时，改向该基址的 engine 路由发起跨域 SSE。
+ * 可通过环境变量 VITE_ENGINE_FALLBACK_BASE_URL 覆盖。
+ */
+const CROSS_ORIGIN_FALLBACK_BASE: string =
+  (import.meta.env.VITE_ENGINE_FALLBACK_BASE_URL as string | undefined)?.trim() ||
+  'https://x4jln-11eca153605a42838371c1aab05637d0-preview.app.atoms.dev';
 
 const delay = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 
@@ -182,6 +192,8 @@ async function readChallengeError(response: Response): Promise<string | null> {
  * - 公网入口存在间歇性网关防护拦截（403 挑战页，同一请求时通时不通），
  *   这里对瞬态失败（403/408/429/5xx、网络错误、HTML 防护页）自动重试，
  *   重试耗尽后抛出友好中文提示，绝不把原始 HTML 透传给用户。
+ * - 部署域名被边缘防护持续拦截时，重试耗尽后末级回退改向预览后端跨域发起
+ *   SSE（跨域请求不携带凭证），保障发布环境 AI 功能可用。
  */
 export function streamGenerate(opts: {
   messages: GenMessage[];
@@ -212,73 +224,99 @@ export function streamGenerate(opts: {
         return { model: opts.model, stream: true, messages };
       };
 
-      // 显式 fetch 代替 SDK stream 封装：显式携带同源 Cookie、仅保留常规标准头
-      // （不发送 App-Host 等自定义头）、正确透传中止信号
-      const invokeOnce = (url: string) =>
+      // 显式 fetch 代替 SDK stream 封装：仅保留常规标准头（不发送 App-Host 等自定义头）、
+      // 正确透传中止信号；同源请求显式携带 Cookie，跨域回退请求不携带凭证
+      const invokeOnce = (url: string, crossOrigin: boolean) =>
         fetch(url, {
           method: 'POST',
-          credentials: 'same-origin',
+          credentials: crossOrigin ? 'omit' : 'same-origin',
           headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
           body: JSON.stringify(buildPayload()),
           signal: controller.signal,
         });
 
+      // 末级跨域回退端点：部署域名的 AI 接口可能被平台边缘防护（Cloudflare 托管挑战）
+      // 会话级拦截，而预览后端公网可达且已放行跨域（实测预检 204 + ACAO: *）。
+      // 页面本就运行在回退基址（预览域名）上时同源即最优，不启用跨域回退。
+      const crossOriginFallbackEndpoint =
+        window.location.origin === CROSS_ORIGIN_FALLBACK_BASE
+          ? ''
+          : `${CROSS_ORIGIN_FALLBACK_BASE}/api/v1/engine/gentxt`;
+
       try {
-        let endpoint = PRIMARY_ENDPOINT;
         let lastError = '';
         let sawProtection = false;
-        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-          let response: Response;
-          try {
-            response = await invokeOnce(endpoint);
-          } catch {
-            lastError = '网络连接异常，请稍后重试';
-            if (attempt < MAX_ATTEMPTS) {
-              await delay(600 * attempt);
-              continue;
-            }
-            throw new Error(lastError);
-          }
+        let hardFailure = false;
 
-          if (!response.ok) {
-            lastError = `HTTP ${response.status}：${await readFriendlyError(response)}`;
-            if (response.status === 403 || RETRYABLE_STATUS.has(response.status)) sawProtection = true;
-            // 部署快照可能尚未包含自有引擎路由：404 时切换端点且不消耗重试次数
-            if (response.status === 404 && endpoint === PRIMARY_ENDPOINT) {
-              endpoint = FALLBACK_ENDPOINT;
-              attempt -= 1;
-              continue;
-            }
-            // 兼容尚未支持 messages_b64 的旧后端：422/400 时退回明文消息且不消耗重试次数
-            if (useTransportEncoding && (response.status === 422 || response.status === 400)) {
-              useTransportEncoding = false;
-              attempt -= 1;
-              continue;
-            }
-            if (RETRYABLE_STATUS.has(response.status) && attempt < MAX_ATTEMPTS) {
-              await delay(600 * attempt);
-              continue;
-            }
-            throw new Error(lastError);
-          }
+        // 两阶段重试：第 1 阶段走同源链路（engine → aihub）；命中边缘防护且重试耗尽后，
+        // 第 2 阶段改向预览后端跨域回退端点再走一轮完整重试
+        const stages: Array<{ url: string; crossOrigin: boolean }> = crossOriginFallbackEndpoint
+          ? [
+              { url: PRIMARY_ENDPOINT, crossOrigin: false },
+              { url: crossOriginFallbackEndpoint, crossOrigin: true },
+            ]
+          : [{ url: PRIMARY_ENDPOINT, crossOrigin: false }];
 
-          // 状态码成功但返回的是 HTML 防护页：按失败处理
-          const challengeError = await readChallengeError(response);
-          if (challengeError) {
-            lastError = challengeError;
-            sawProtection = true;
-            if (attempt < MAX_ATTEMPTS) {
-              await delay(600 * attempt);
-              continue;
+        for (const stage of stages) {
+          let endpoint = stage.url;
+          for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            let response: Response;
+            try {
+              response = await invokeOnce(endpoint, stage.crossOrigin);
+            } catch {
+              lastError = '网络连接异常，请稍后重试';
+              if (attempt < MAX_ATTEMPTS) {
+                await delay(600 * attempt);
+                continue;
+              }
+              break;
             }
-            throw new Error(lastError);
-          }
 
-          resolve(
-            await consumeSseStream(response, { onChunk: opts.onChunk, signal: controller.signal }),
-          );
-          return;
+            if (!response.ok) {
+              lastError = `HTTP ${response.status}：${await readFriendlyError(response)}`;
+              if (response.status === 403 || RETRYABLE_STATUS.has(response.status)) sawProtection = true;
+              // 部署快照可能尚未包含自有引擎路由：404 时切换端点且不消耗重试次数（跨域回退阶段无此需求）
+              if (response.status === 404 && !stage.crossOrigin && endpoint === PRIMARY_ENDPOINT) {
+                endpoint = FALLBACK_ENDPOINT;
+                attempt -= 1;
+                continue;
+              }
+              // 兼容尚未支持 messages_b64 的旧后端：422/400 时退回明文消息且不消耗重试次数
+              if (useTransportEncoding && (response.status === 422 || response.status === 400)) {
+                useTransportEncoding = false;
+                attempt -= 1;
+                continue;
+              }
+              if (RETRYABLE_STATUS.has(response.status) && attempt < MAX_ATTEMPTS) {
+                await delay(600 * attempt);
+                continue;
+              }
+              // 非瞬态的应用层错误（如 401/405/413）：换端点也会复现，不进入跨域回退阶段
+              if (!RETRYABLE_STATUS.has(response.status)) hardFailure = true;
+              break;
+            }
+
+            // 状态码成功但返回的是 HTML 防护页：按失败处理
+            const challengeError = await readChallengeError(response);
+            if (challengeError) {
+              lastError = challengeError;
+              sawProtection = true;
+              if (attempt < MAX_ATTEMPTS) {
+                await delay(600 * attempt);
+                continue;
+              }
+              break;
+            }
+
+            resolve(
+              await consumeSseStream(response, { onChunk: opts.onChunk, signal: controller.signal }),
+            );
+            return;
+          }
+          // 仅当本阶段因边缘防护耗尽重试时才进入下一阶段（跨域回退）；其余失败直接结束
+          if (!sawProtection || hardFailure) break;
         }
+
         const advice = sawProtection
           ? '（已自动重试仍被拦截，建议更换网络环境后重试，或联系平台支持）'
           : '';
