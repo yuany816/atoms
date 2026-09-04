@@ -122,10 +122,8 @@ def resolve_transport_encoding(request: GenTxtRequest) -> GenTxtRequest:
     )
 
 
-@router.post("/gentxt")
-async def generate_text(request: GenTxtRequest):
-    """
-    Generate Text for the app engine (same protocol as /api/v1/aihub/gentxt).
+async def handle_generate_text(request: GenTxtRequest):
+    """Shared implementation for the engine text generation endpoints.
 
     - stream=false: return a full JSON response
     - stream=true: return an SSE streaming response
@@ -164,3 +162,20 @@ async def generate_text(request: GenTxtRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=friendly_error_message(e),
         ) from e
+
+
+@router.post("/gentxt")
+async def generate_text(request: GenTxtRequest):
+    """Generate Text for the app engine (same protocol as /api/v1/aihub/gentxt)."""
+    return await handle_generate_text(request)
+
+
+@router.post("/text-stream")
+async def generate_text_alias(request: GenTxtRequest):
+    """Path-level alias of /gentxt (identical handler, protocol and model whitelist).
+
+    The deployed domain's edge protection appears to match requests by path;
+    this alias gives the frontend an alternate path to try before entering the
+    cross-origin fallback stage.
+    """
+    return await handle_generate_text(request)

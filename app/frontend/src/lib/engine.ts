@@ -113,6 +113,8 @@ const MAX_ATTEMPTS = 3;
 const CHALLENGE_HINT = /just a moment|attention required|cf-mitigated|challenge-platform|cloudflare/i;
 /** 生成端点：优先应用自有引擎路由，部署快照未包含该路由（404）时回退到平台 AI Hub 保留路径 */
 const PRIMARY_ENDPOINT = '/api/v1/engine/gentxt';
+/** 路径级同义路由：部署域名边缘防护疑似按 /gentxt 路径匹配拦截，同义路径可能绕过 */
+const ALIAS_ENDPOINT = '/api/v1/engine/text-stream';
 const FALLBACK_ENDPOINT = '/api/v1/aihub/gentxt';
 /**
  * 末级跨域回退后端基址：部署域名（*.pub.atoms.world）的 AI 接口可能被平台边缘防护
@@ -192,8 +194,9 @@ async function readChallengeError(response: Response): Promise<string | null> {
  * - 公网入口存在间歇性网关防护拦截（403 挑战页，同一请求时通时不通），
  *   这里对瞬态失败（403/408/429/5xx、网络错误、HTML 防护页）自动重试，
  *   重试耗尽后抛出友好中文提示，绝不把原始 HTML 透传给用户。
- * - 部署域名被边缘防护持续拦截时，重试耗尽后末级回退改向预览后端跨域发起
- *   SSE（跨域请求不携带凭证），保障发布环境 AI 功能可用。
+ * - 部署域名被边缘防护持续拦截时，先尝试同义路径 /api/v1/engine/text-stream
+ *   （边缘规则疑似按 /gentxt 路径匹配），重试耗尽后末级回退改向预览后端跨域
+ *   发起 SSE（跨域请求不携带凭证），保障发布环境 AI 功能可用。
  */
 export function streamGenerate(opts: {
   messages: GenMessage[];
@@ -248,14 +251,20 @@ export function streamGenerate(opts: {
         let sawProtection = false;
         let hardFailure = false;
 
-        // 两阶段重试：第 1 阶段走同源链路（engine → aihub）；命中边缘防护且重试耗尽后，
-        // 第 2 阶段改向预览后端跨域回退端点再走一轮完整重试
-        const stages: Array<{ url: string; crossOrigin: boolean }> = crossOriginFallbackEndpoint
-          ? [
-              { url: PRIMARY_ENDPOINT, crossOrigin: false },
-              { url: crossOriginFallbackEndpoint, crossOrigin: true },
-            ]
-          : [{ url: PRIMARY_ENDPOINT, crossOrigin: false }];
+        // 三阶段重试：第 1 阶段走同源 engine 路由（部署快照未含该路由时 404 回退 aihub）；
+        // 第 2 阶段尝试同源同义路径 text-stream（边缘防护疑似按 /gentxt 路径匹配，
+        // 旧部署快照无该路由时 404 直接跳过本阶段）；命中边缘防护且重试耗尽后，
+        // 第 3 阶段改向预览后端跨域回退端点再走一轮完整重试
+        const stages: Array<{
+          url: string;
+          crossOrigin: boolean;
+          fallbackUrlOn404?: string;
+          skipStageOn404?: boolean;
+        }> = [
+          { url: PRIMARY_ENDPOINT, crossOrigin: false, fallbackUrlOn404: FALLBACK_ENDPOINT },
+          { url: ALIAS_ENDPOINT, crossOrigin: false, skipStageOn404: true },
+          ...(crossOriginFallbackEndpoint ? [{ url: crossOriginFallbackEndpoint, crossOrigin: true }] : []),
+        ];
 
         for (const stage of stages) {
           let endpoint = stage.url;
@@ -275,11 +284,15 @@ export function streamGenerate(opts: {
             if (!response.ok) {
               lastError = `HTTP ${response.status}：${await readFriendlyError(response)}`;
               if (response.status === 403 || RETRYABLE_STATUS.has(response.status)) sawProtection = true;
-              // 部署快照可能尚未包含自有引擎路由：404 时切换端点且不消耗重试次数（跨域回退阶段无此需求）
-              if (response.status === 404 && !stage.crossOrigin && endpoint === PRIMARY_ENDPOINT) {
-                endpoint = FALLBACK_ENDPOINT;
-                attempt -= 1;
-                continue;
+              // 部署快照可能尚未包含自有引擎路由：404 时切换端点且不消耗重试次数
+              if (response.status === 404 && !stage.crossOrigin) {
+                if (stage.fallbackUrlOn404 && endpoint === stage.url) {
+                  endpoint = stage.fallbackUrlOn404;
+                  attempt -= 1;
+                  continue;
+                }
+                // 同义路径在旧部署快照中不存在：跳过本阶段进入下一阶段，不视为硬失败
+                if (stage.skipStageOn404) break;
               }
               // 兼容尚未支持 messages_b64 的旧后端：422/400 时退回明文消息且不消耗重试次数
               if (useTransportEncoding && (response.status === 422 || response.status === 400)) {
