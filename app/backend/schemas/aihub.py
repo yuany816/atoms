@@ -48,6 +48,14 @@ class GenTxtRequest(BaseModel):
     """Generate Text request parameters."""
 
     messages: List[ChatMessage] = Field(..., description="Conversation messages list.")
+    messages_b64: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional transport encoding: base64(JSON(messages)). The frontend encodes the "
+            "conversation so legitimate HTML/JS code in chat history is not misjudged by edge "
+            "WAF rules as XSS payloads; when present it takes precedence over `messages`."
+        ),
+    )
     model: str = Field(default="deepseek-v4-pro", description="Model name")
     stream: bool = Field(default=False, description="Whether to enable streaming output.")
     temperature: Optional[float] = Field(default=0.7, description="Sampling temperature (0-2).")

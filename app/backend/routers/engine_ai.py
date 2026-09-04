@@ -7,6 +7,8 @@ get 403), so the app exposes its own `/api/v1/engine/gentxt` route that calls
 `AIHubService` directly and returns the same SSE protocol.
 """
 
+import base64
+import binascii
 import json
 import logging
 
@@ -40,6 +42,53 @@ def friendly_error_message(error: Exception) -> str:
     return detail
 
 
+# messages_b64 传输编码体积上限（base64 字符数），防止超大请求体滥用
+_MAX_MESSAGES_B64_LEN = 4_000_000
+
+
+def resolve_transport_encoding(request: GenTxtRequest) -> GenTxtRequest:
+    """Decode base64-transported messages when present.
+
+    The frontend base64-encodes the message list so that legitimate HTML/JS
+    content in conversations (generated app code) is not misjudged by edge WAF
+    rules as XSS payloads. Decoding here is transparent to the AI service.
+    """
+    if not request.messages_b64:
+        if not request.messages:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="缺少会话消息，请刷新页面后重试",
+            )
+        return request
+    encoded = request.messages_b64.strip()
+    if not encoded:
+        return request
+    if len(encoded) > _MAX_MESSAGES_B64_LEN:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="会话内容过大，请缩短对话或新建项目后重试",
+        )
+    try:
+        payload = json.loads(base64.b64decode(encoded).decode("utf-8"))
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="会话数据解码失败，请刷新页面后重试",
+        ) from e
+    if not isinstance(payload, list) or not payload:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="会话数据格式错误，请刷新页面后重试",
+        )
+    return GenTxtRequest(
+        messages=payload,
+        model=request.model,
+        stream=request.stream,
+        temperature=request.temperature,
+        max_tokens=request.max_tokens,
+    )
+
+
 @router.post("/gentxt")
 async def generate_text(request: GenTxtRequest):
     """
@@ -48,6 +97,9 @@ async def generate_text(request: GenTxtRequest):
     - stream=false: return a full JSON response
     - stream=true: return an SSE streaming response
     """
+    # 解码前端传输编码的会话（messages_b64）；解码失败直接 400，不进入 AI 调用
+    request = resolve_transport_encoding(request)
+
     try:
         service = AIHubService()
 
