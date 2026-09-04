@@ -195,8 +195,16 @@ export function streamGenerate(opts: {
 
       // 传输编码开关：默认 base64 编码消息；遇到仅支持明文 messages 的旧后端时自动关闭
       let useTransportEncoding = true;
+      // 防御式修正：部分上游模型（Anthropic 系）不支持 assistant prefill，
+      // 要求对话必须以 user 消息结束——从末尾剔除 assistant 消息（如 UI 展示用的
+      // 「正在思考」空占位或中断残留），保证请求体合法
+      const outboundMessages = (() => {
+        const list = [...opts.messages];
+        while (list.length > 0 && list[list.length - 1].role === 'assistant') list.pop();
+        return list;
+      })();
       const buildPayload = () => {
-        const messages = opts.messages.map((m) => ({ role: m.role, content: m.content }));
+        const messages = outboundMessages.map((m) => ({ role: m.role, content: m.content }));
         if (useTransportEncoding) {
           // 编码模式下 messages 置空数组以通过共享 Schema 校验，真实内容在 messages_b64 中
           return { model: opts.model, stream: true, messages: [], messages_b64: encodeMessagesB64(messages) };

@@ -202,7 +202,16 @@ export default function ProjectWorkspace() {
 
     const state = useProjectStore.getState();
     const latest = state.projects.find((p) => p.id === projectId);
-    const history = (latest?.messages ?? [userMsg])
+    // 构建模型上下文：剔除失败占位消息，并从末尾裁掉 assistant 消息（含本轮「正在思考」
+    // 空占位与中断残留）——部分上游模型不支持 assistant prefill，要求对话以 user 消息结尾
+    const contextMessages = (latest?.messages ?? [userMsg]).filter((m) => !m.error);
+    while (
+      contextMessages.length > 0 &&
+      contextMessages[contextMessages.length - 1].role === 'assistant'
+    ) {
+      contextMessages.pop();
+    }
+    const history = contextMessages
       .slice(-8)
       .map((m) => ({
         role: m.role,
