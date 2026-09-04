@@ -1,0 +1,38 @@
+{
+    "title": "KnowledgeChunks",
+    "type": "object",
+    "properties": {
+        "id": {
+            "type": "integer"
+        },
+        "file_id": {
+            "type": "integer",
+            "description": "所属知识文件 id"
+        },
+        "file_name": {
+            "type": "string",
+            "description": "所属文件名"
+        },
+        "chunk_index": {
+            "type": "integer",
+            "description": "块序号"
+        },
+        "content": {
+            "type": "string",
+            "description": "文本块内容"
+        },
+        "embedding": {
+            "type": "string",
+            "description": "向量（JSON 数组字符串，hash 词袋 256 维）"
+        },
+        "dim": {
+            "type": "integer",
+            "description": "向量维度"
+        }
+    },
+    "required": [
+        "file_id",
+        "content",
+        "embedding"
+    ]
+}

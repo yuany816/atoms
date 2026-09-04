@@ -9,6 +9,9 @@ import ShareView from './pages/ShareView';
 import NotFound from './pages/NotFound';
 import AuthCallback from './pages/AuthCallback';
 import AuthError from './pages/AuthError';
+import KnowledgeBase from './pages/KnowledgeBase';
+import SkillsConfig from './pages/SkillsConfig';
+import Evaluation from './pages/Evaluation';
 // MODULE_IMPORTS_START
 // MODULE_IMPORTS_END
 
@@ -22,6 +25,9 @@ const AppRoutes = () => (
     <Route path="/p/:slug" element={<PublishedApp />} />
     <Route path="/share/:id" element={<ShareView />} />
     {/* <Route path="/blog/*" element={<BlogRoutes />} /> */}
+    <Route path="/knowledge" element={<KnowledgeBase />} />
+    <Route path="/skills" element={<SkillsConfig />} />
+    <Route path="/evaluation" element={<Evaluation />} />
     <Route path="/auth/callback" element={<AuthCallback />} />
     <Route path="/auth/error" element={<AuthError />} />
     {/* MODULE_ROUTES_START */}

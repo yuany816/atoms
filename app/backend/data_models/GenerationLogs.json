@@ -1,0 +1,40 @@
+{
+    "title": "GenerationLogs",
+    "type": "object",
+    "properties": {
+        "id": {
+            "type": "integer"
+        },
+        "project_id": {
+            "type": "string",
+            "description": "项目标识"
+        },
+        "model": {
+            "type": "string",
+            "description": "使用的模型"
+        },
+        "user_message": {
+            "type": "string",
+            "description": "用户消息"
+        },
+        "assistant_message": {
+            "type": "string",
+            "description": "模型回复"
+        },
+        "kb_sources": {
+            "type": "string",
+            "description": "命中的知识来源（JSON 数组字符串）"
+        },
+        "skill_names": {
+            "type": "string",
+            "description": "注入的技能名（JSON 数组字符串）"
+        },
+        "query": {
+            "type": "string",
+            "description": "检索查询原文"
+        }
+    },
+    "required": [
+        "user_message"
+    ]
+}

@@ -1,0 +1,37 @@
+{
+    "title": "KnowledgeFiles",
+    "type": "object",
+    "properties": {
+        "id": {
+            "type": "integer"
+        },
+        "file_name": {
+            "type": "string",
+            "description": "原始文件名"
+        },
+        "file_type": {
+            "type": "string",
+            "description": "文件类型 txt/md/pdf/docx"
+        },
+        "size_bytes": {
+            "type": "integer",
+            "description": "文件大小（字节）"
+        },
+        "chunk_count": {
+            "type": "integer",
+            "description": "切块数量"
+        },
+        "status": {
+            "type": "string",
+            "description": "处理状态 ready/failed"
+        },
+        "note": {
+            "type": "string",
+            "description": "备注"
+        }
+    },
+    "required": [
+        "file_name",
+        "file_type"
+    ]
+}

@@ -1,0 +1,25 @@
+{
+    "title": "AnnotationRecords",
+    "type": "object",
+    "properties": {
+        "id": {
+            "type": "integer"
+        },
+        "log_id": {
+            "type": "integer",
+            "description": "关联的回流记录 id"
+        },
+        "label": {
+            "type": "string",
+            "description": "标注 good/bad/pending"
+        },
+        "note": {
+            "type": "string",
+            "description": "标注备注"
+        }
+    },
+    "required": [
+        "log_id",
+        "label"
+    ]
+}

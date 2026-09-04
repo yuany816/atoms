@@ -1,0 +1,46 @@
+{
+    "title": "SkillPackages",
+    "type": "object",
+    "properties": {
+        "id": {
+            "type": "integer"
+        },
+        "name": {
+            "type": "string",
+            "description": "技能名称"
+        },
+        "file_name": {
+            "type": "string",
+            "description": "原始包文件名"
+        },
+        "file_type": {
+            "type": "string",
+            "description": "包类型 zip/md/yaml"
+        },
+        "scenes": {
+            "type": "string",
+            "description": "应用场景标签（JSON 数组字符串）"
+        },
+        "description": {
+            "type": "string",
+            "description": "技能简介"
+        },
+        "usage": {
+            "type": "string",
+            "description": "用法说明"
+        },
+        "content": {
+            "type": "string",
+            "description": "技能说明全文"
+        },
+        "enabled": {
+            "type": "boolean",
+            "description": "是否启用参与会话增强"
+        }
+    },
+    "required": [
+        "name",
+        "file_type",
+        "content"
+    ]
+}

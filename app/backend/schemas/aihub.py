@@ -56,6 +56,10 @@ class GenTxtRequest(BaseModel):
             "WAF rules as XSS payloads; when present it takes precedence over `messages`."
         ),
     )
+    project_id: Optional[str] = Field(
+        default=None,
+        description="Optional project identifier used for generation log tracing (evaluation data flywheel).",
+    )
     model: str = Field(default="deepseek-v4-pro", description="Model name")
     stream: bool = Field(default=False, description="Whether to enable streaming output.")
     temperature: Optional[float] = Field(default=0.7, description="Sampling temperature (0-2).")

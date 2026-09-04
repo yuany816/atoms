@@ -1,6 +1,16 @@
-import { BookOpen, CircleHelp, House, LayoutTemplate } from 'lucide-react';
+import {
+  BookOpen,
+  CircleHelp,
+  Database,
+  House,
+  LayoutTemplate,
+  ClipboardCheck,
+  Puzzle,
+} from 'lucide-react';
+import { useLocation, useNavigate } from 'react-router-dom';
 
-// 全局左侧菜单栏（2026-09-02 用户要求增加，覆盖原顶部导航设计）
+// 全局左侧菜单栏（2026-09-02 用户要求增加，覆盖原顶部导航设计；
+// 任务18 新增知识库 / 技能配置 / 评测三个路由入口）
 
 interface SidebarNavItem {
   key: string;
@@ -19,9 +29,22 @@ export function AppSidebar({
   onOpenGuide: () => void;
   onHelp: () => void;
 }) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const path = location.pathname;
+
   const navItems: SidebarNavItem[] = [
-    { key: 'dashboard', label: '工作台', icon: House, active: true },
+    {
+      key: 'dashboard',
+      label: '工作台',
+      icon: House,
+      active: path === '/dashboard' || path.startsWith('/project/'),
+      onClick: () => navigate('/dashboard'),
+    },
     { key: 'templates', label: '模板', icon: LayoutTemplate, onClick: onOpenTemplates },
+    { key: 'knowledge', label: '知识库', icon: Database, active: path === '/knowledge', onClick: () => navigate('/knowledge') },
+    { key: 'skills', label: '技能配置', icon: Puzzle, active: path === '/skills', onClick: () => navigate('/skills') },
+    { key: 'evaluation', label: '评测', icon: ClipboardCheck, active: path === '/evaluation', onClick: () => navigate('/evaluation') },
     { key: 'guide', label: '使用指引', icon: BookOpen, onClick: onOpenGuide },
   ];
 

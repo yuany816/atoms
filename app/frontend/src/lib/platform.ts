@@ -41,12 +41,17 @@ export interface Project {
   updatedAt: number;
 }
 
-// ---------- 文本模型池（用户指定白名单，claude-opus-5 为默认） ----------
+// ---------- 文本模型池（用户指定白名单，claude-opus-5 为默认；2026-09-04 扩充：3 原有 + 5 新增） ----------
 
 export const MODEL_POOL = [
   { id: 'claude-opus-5', label: 'Claude Opus 5' },
   { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
   { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
+  { id: 'gpt-5.4', label: 'GPT-5.4' },
+  { id: 'gpt-5.5', label: 'GPT-5.5' },
+  { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview' },
+  { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+  { id: 'claude-opus-4.6', label: 'Claude Opus 4.6' },
 ] as const;
 
 export const DEFAULT_MODEL: string = MODEL_POOL[0].id;
@@ -415,4 +420,212 @@ export async function uploadAsset(payload: {
     data: payload,
   });
   return (res as unknown as { data: { url: string; object_key: string } }).data;
+}
+
+// ---------- 知识库 API（任务18） ----------
+
+export interface KbFile {
+  id: number;
+  file_name: string;
+  file_type: string;
+  size_bytes: number;
+  chunk_count: number;
+  status: string;
+  created_at?: string;
+}
+
+export interface KbChunk {
+  id: number;
+  chunk_index: number;
+  content: string;
+}
+
+export async function uploadKbFile(payload: {
+  file_name: string;
+  content_base64: string;
+}): Promise<KbFile> {
+  const res = await client.apiCall.invoke({
+    url: '/api/v1/kb',
+    method: 'POST',
+    data: payload,
+  });
+  return (res as unknown as { data: KbFile }).data;
+}
+
+export async function listKbFiles(): Promise<{ items: KbFile[]; total: number }> {
+  const res = await client.apiCall.invoke({
+    url: '/api/v1/kb/files',
+    method: 'GET',
+    data: {},
+  });
+  return (res as unknown as { data: { items: KbFile[]; total: number } }).data;
+}
+
+export async function listKbChunks(
+  fileId: number,
+): Promise<{ file: KbFile; items: KbChunk[]; total: number }> {
+  const res = await client.apiCall.invoke({
+    url: `/api/v1/kb/files/${fileId}/chunks`,
+    method: 'GET',
+    data: {},
+  });
+  return (res as unknown as { data: { file: KbFile; items: KbChunk[]; total: number } }).data;
+}
+
+export async function deleteKbFile(fileId: number): Promise<void> {
+  await client.apiCall.invoke({
+    url: `/api/v1/kb/files/${fileId}`,
+    method: 'DELETE',
+    data: {},
+  });
+}
+
+// ---------- 技能配置 API（任务18） ----------
+
+export interface SkillPackage {
+  id: number;
+  name: string;
+  file_name: string;
+  file_type: string;
+  scenes: string[];
+  description: string;
+  usage: string;
+  enabled: boolean;
+  created_at?: string;
+}
+
+export async function uploadSkillPackage(payload: {
+  file_name: string;
+  content_base64: string;
+}): Promise<SkillPackage> {
+  const res = await client.apiCall.invoke({
+    url: '/api/v1/skills',
+    method: 'POST',
+    data: payload,
+  });
+  return (res as unknown as { data: SkillPackage }).data;
+}
+
+export async function listSkills(): Promise<{ items: SkillPackage[]; total: number }> {
+  const res = await client.apiCall.invoke({
+    url: '/api/v1/skills',
+    method: 'GET',
+    data: {},
+  });
+  return (res as unknown as { data: { items: SkillPackage[]; total: number } }).data;
+}
+
+export async function toggleSkill(skillId: number, enabled: boolean): Promise<SkillPackage> {
+  const res = await client.apiCall.invoke({
+    url: `/api/v1/skills/${skillId}/enabled`,
+    method: 'PUT',
+    data: { enabled },
+  });
+  return (res as unknown as { data: SkillPackage }).data;
+}
+
+export async function deleteSkill(skillId: number): Promise<void> {
+  await client.apiCall.invoke({
+    url: `/api/v1/skills/${skillId}`,
+    method: 'DELETE',
+    data: {},
+  });
+}
+
+// ---------- 评测 API（任务18） ----------
+
+export interface EvalStats {
+  total_logs: number;
+  labels: { good: number; bad: number; pending: number };
+  annotated: number;
+  rag: {
+    hit_logs: number;
+    hit_rate: number;
+    avg_score: number | null;
+    max_score: number | null;
+    min_score: number | null;
+    score_count: number;
+  };
+}
+
+export interface GenerationLog {
+  id: number;
+  project_id: string;
+  model: string;
+  user_message: string;
+  assistant_message: string;
+  kb_sources: Array<{ file_name?: string; chunk_index?: number; score?: number }>;
+  skill_names: string[];
+  query: string;
+  created_at?: string;
+  annotation: { id: number; label: string; note: string } | null;
+}
+
+export async function fetchEvalStats(): Promise<EvalStats> {
+  const res = await client.apiCall.invoke({
+    url: '/api/v1/eval/stats',
+    method: 'GET',
+    data: {},
+  });
+  return (res as unknown as { data: EvalStats }).data;
+}
+
+export async function fetchEvalLogs(
+  skip = 0,
+  limit = 50,
+): Promise<{ items: GenerationLog[]; total: number; skip: number; limit: number }> {
+  const res = await client.apiCall.invoke({
+    url: '/api/v1/eval/logs',
+    method: 'GET',
+    data: { skip, limit },
+  });
+  return (
+    res as unknown as { data: { items: GenerationLog[]; total: number; skip: number; limit: number } }
+  ).data;
+}
+
+export async function saveAnnotation(payload: {
+  log_id: number;
+  label: 'good' | 'bad' | 'pending';
+  note?: string;
+}): Promise<void> {
+  await client.apiCall.invoke({
+    url: '/api/v1/eval/annotations',
+    method: 'POST',
+    data: payload,
+  });
+}
+
+export function datasetExportUrl(format: 'jsonl' | 'json' | 'csv', includeUnlabeled = false): string {
+  const params = new URLSearchParams({ format, include_unlabeled: String(includeUnlabeled) });
+  return `/api/v1/eval/export/dataset?${params.toString()}`;
+}
+
+/** 下载微调数据集文件（文件流下载，非数据接口调用）：浏览器侧落盘 JSONL / CSV。 */
+export async function downloadDataset(
+  format: 'jsonl' | 'json' | 'csv',
+  includeUnlabeled = false,
+): Promise<void> {
+  const res = await fetch(datasetExportUrl(format, includeUnlabeled), {
+    credentials: 'same-origin',
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = JSON.parse(await res.text()) as { detail?: string };
+      if (data.detail) detail = data.detail;
+    } catch {
+      // 非 JSON 错误体，保留状态码提示
+    }
+    throw new Error(detail);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `finetune-dataset.${format}`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }

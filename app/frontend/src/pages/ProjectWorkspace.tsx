@@ -231,7 +231,20 @@ export default function ProjectWorkspace() {
           ...history,
         ],
         model,
+        projectId,
         onChunk: (chunk) => appendMessageChunk(projectId, assistantId, chunk),
+        onEnhancement: (info) => {
+          // 会话自动增强来源标注：在终端日志中记录命中的知识与注入的技能
+          const kb = (info.kb_sources ?? []).map(
+            (s) => `${s.file_name || '未知文件'}#${s.chunk_index ?? '-'}(相关度 ${s.score ?? '-'})`,
+          );
+          const sk = info.skill_names ?? [];
+          if (kb.length > 0) appendLog(projectId, `命中知识: ${kb.join('、')}`, 'success');
+          if (sk.length > 0) appendLog(projectId, `注入技能: ${sk.join('、')}`, 'success');
+          if (kb.length === 0 && sk.length === 0) {
+            appendLog(projectId, '本次未命中知识库/技能上下文');
+          }
+        },
       });
 
       const after = useProjectStore.getState().projects.find((p) => p.id === projectId);

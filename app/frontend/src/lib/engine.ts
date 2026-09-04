@@ -37,13 +37,23 @@ export interface GenMessage {
   content: string;
 }
 
+/** 来源标注帧：本次生成命中的知识片段与注入技能（会话自动增强）。 */
+export interface EnhancementInfo {
+  kb_sources?: Array<{ file_name?: string; chunk_index?: number; score?: number }>;
+  skill_names?: string[];
+}
+
 /**
  * 解析 SSE 流式响应：逐帧提取 data JSON 的 content，收到 [DONE] 结束，
  * 收到 [ERROR] 帧时抛出后端透传的错误详情。
  */
 async function consumeSseStream(
   response: Response,
-  handlers: { onChunk: (text: string) => void; signal: AbortSignal },
+  handlers: {
+    onChunk: (text: string) => void;
+    onEnhancement?: (info: EnhancementInfo) => void;
+    signal: AbortSignal;
+  },
 ): Promise<string> {
   const reader = response.body?.getReader();
   if (!reader) throw new Error('当前浏览器不支持流式响应读取');
@@ -56,11 +66,15 @@ async function consumeSseStream(
     // 返回 true 表示流结束（收到 [DONE]）
     if (!payload) return false;
     if (payload === '[DONE]') return true;
-    let parsed: { content?: unknown };
+    let parsed: { content?: unknown; enhancement?: EnhancementInfo };
     try {
-      parsed = JSON.parse(payload) as { content?: unknown };
+      parsed = JSON.parse(payload) as { content?: unknown; enhancement?: EnhancementInfo };
     } catch {
       return false; // 忽略心跳等非 JSON 帧
+    }
+    // 来源标注帧（无 content 字段）：向宿主回调命中的知识与技能来源
+    if (parsed.enhancement && handlers.onEnhancement) {
+      handlers.onEnhancement(parsed.enhancement);
     }
     const content = typeof parsed.content === 'string' ? parsed.content : '';
     if (content.startsWith('[ERROR]')) {
@@ -201,7 +215,9 @@ async function readChallengeError(response: Response): Promise<string | null> {
 export function streamGenerate(opts: {
   messages: GenMessage[];
   model: string;
+  projectId?: string;
   onChunk: (text: string) => void;
+  onEnhancement?: (info: EnhancementInfo) => void;
 }): Promise<string> {
   return new Promise((resolve, reject) => {
     void (async () => {
@@ -222,9 +238,15 @@ export function streamGenerate(opts: {
         const messages = outboundMessages.map((m) => ({ role: m.role, content: m.content }));
         if (useTransportEncoding) {
           // 编码模式下 messages 置空数组以通过共享 Schema 校验，真实内容在 messages_b64 中
-          return { model: opts.model, stream: true, messages: [], messages_b64: encodeMessagesB64(messages) };
+          return {
+            model: opts.model,
+            stream: true,
+            messages: [],
+            messages_b64: encodeMessagesB64(messages),
+            project_id: opts.projectId,
+          };
         }
-        return { model: opts.model, stream: true, messages };
+        return { model: opts.model, stream: true, messages, project_id: opts.projectId };
       };
 
       // 显式 fetch 代替 SDK stream 封装：仅保留常规标准头（不发送 App-Host 等自定义头）、
@@ -322,7 +344,11 @@ export function streamGenerate(opts: {
             }
 
             resolve(
-              await consumeSseStream(response, { onChunk: opts.onChunk, signal: controller.signal }),
+              await consumeSseStream(response, {
+                onChunk: opts.onChunk,
+                onEnhancement: opts.onEnhancement,
+                signal: controller.signal,
+              }),
             );
             return;
           }
