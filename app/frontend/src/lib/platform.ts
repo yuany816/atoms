@@ -41,7 +41,7 @@ export interface Project {
   updatedAt: number;
 }
 
-// ---------- 文本模型池（用户指定白名单，claude-opus-5 为默认；2026-09-04 扩充：3 原有 + 5 新增） ----------
+// ---------- 文本模型池（用户指定白名单，claude-opus-5 为默认；2026-09-04 扩充：3 原有 + 5 新增；2026-09-10 增补 DeepSeek 官方直连 2 项） ----------
 
 export const MODEL_POOL = [
   { id: 'claude-opus-5', label: 'Claude Opus 5' },
@@ -52,6 +52,8 @@ export const MODEL_POOL = [
   { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview' },
   { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
   { id: 'claude-opus-4.6', label: 'Claude Opus 4.6' },
+  { id: 'deepseek-chat', label: 'DeepSeek Chat（官方直连）' },
+  { id: 'deepseek-reasoner', label: 'DeepSeek Reasoner（官方直连）' },
 ] as const;
 
 export const DEFAULT_MODEL: string = MODEL_POOL[0].id;

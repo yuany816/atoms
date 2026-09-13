@@ -22,6 +22,7 @@ from models.SkillPackages import Skillpackages
 from routers.aihub import extract_error_message
 from schemas.aihub import ChatMessage, GenTxtRequest
 from services.aihub import AIHubService
+from services.deepseek import DEEPSEEK_DIRECT_MODELS, DeepSeekService, deepseek_configured
 from services.knowledge import cosine, embed, parse_json_array
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,8 @@ ALLOWED_TEXT_MODELS = frozenset(
         "claude-opus-4.6",
         "deepseek-v4-flash",
         "deepseek-v4-pro",
+        "deepseek-chat",
+        "deepseek-reasoner",
         "gpt-5.6-sol",
         "gpt-5.5",
         "gpt-5.4",
@@ -48,6 +51,10 @@ _CHALLENGE_HINTS = ("just a moment", "attention required", "cf-mitigated", "chal
 _PREFILL_HINTS = ("assistant message prefill", "must end with a user message")
 # 上游「AI 余额不足」错误特征：平台 AI 钱包余额耗尽（账号级），转译为中文充值提示
 _BALANCE_HINTS = ("balance is insufficient", "insufficient to finish the operation")
+# DeepSeek 官方直连典型错误特征：401 无效 Key / 402 余额不足 / 429 限流，转译为中文提示
+_DEEPSEEK_AUTH_HINTS = ("error code: 401", "invalid api key", "incorrect api key", "authentication key")
+_DEEPSEEK_BALANCE_HINTS = ("error code: 402", "insufficient_balance", "insufficient balance", "payment required")
+_DEEPSEEK_RATE_HINTS = ("error code: 429", "rate limit", "too many requests")
 
 
 def friendly_error_message(error: Exception) -> str:
@@ -68,6 +75,12 @@ def friendly_error_message(error: Exception) -> str:
         return "当前会话消息格式不被该模型支持，请重新发送消息后重试"
     if any(hint in lowered for hint in _BALANCE_HINTS):
         return "AI 服务余额不足，请先在平台完成充值后重试"
+    if any(hint in lowered for hint in _DEEPSEEK_AUTH_HINTS):
+        return "DeepSeek 服务认证失败，请检查 API Key 配置或联系平台支持"
+    if any(hint in lowered for hint in _DEEPSEEK_BALANCE_HINTS):
+        return "DeepSeek 服务余额不足，请完成充值后重试"
+    if any(hint in lowered for hint in _DEEPSEEK_RATE_HINTS):
+        return "DeepSeek 服务请求过于频繁，请稍后重试"
     if len(detail) > 300:
         detail = detail[:300].rstrip() + "…"
     return detail
@@ -303,6 +316,13 @@ async def handle_generate_text(request: GenTxtRequest):
             detail="不支持的模型，请在工作区模型列表中选择后重试",
         )
 
+    # DeepSeek 直连模型：未配置官方 API Key 时直接友好拒绝，不进入无效调用
+    if request.model in DEEPSEEK_DIRECT_MODELS and not deepseek_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="DeepSeek 官方直连通道未配置，请选择其他模型或联系平台支持",
+        )
+
     # 解码前端传输编码的会话（messages_b64）；解码失败直接 400，不进入 AI 调用
     request = resolve_transport_encoding(request)
 
@@ -319,7 +339,14 @@ async def handle_generate_text(request: GenTxtRequest):
         request = inject_enhancement(request, enhancement_text)
 
     try:
-        service = AIHubService()
+        # 通道选择：DeepSeek 直连模型走官方直连主通道；其余模型走平台 AI Hub 主通道
+        primary = DeepSeekService() if request.model in DEEPSEEK_DIRECT_MODELS else AIHubService()
+        # 回退通道：仅平台 Hub 主通道失败时启用（DeepSeek 直连模型无需回退）
+        fallback = (
+            DeepSeekService()
+            if (request.model not in DEEPSEEK_DIRECT_MODELS and deepseek_configured())
+            else None
+        )
 
         if request.stream:
             from sse_starlette.sse import EventSourceResponse
@@ -345,14 +372,34 @@ async def handle_generate_text(request: GenTxtRequest):
                                 }
                             }
                         )
-                    async for content in service.gentxt_stream(request):
+                    async for content in primary.gentxt_stream(request):
                         full_parts.append(content)
                         yield json.dumps({"content": content})
                 except Exception as e:
-                    logger.error(f"Engine stream error: {e}")
-                    error_text = f"[ERROR] {friendly_error_message(e)}"
-                    full_parts.append(error_text)
-                    yield json.dumps({"content": error_text})
+                    # 回退发生在 [ERROR] 帧之前：平台 Hub 失败（余额不足/上游错误/非流式异常
+                    # 等场景）时自动改走 DeepSeek 官方直连，用户侧无感；回退也失败才下发
+                    # [ERROR] 帧。平台 Hub 正常时行为完全不变。
+                    if fallback is not None:
+                        logger.warning(f"AI Hub stream failed, falling back to DeepSeek direct: {e}")
+                        try:
+                            if full_parts:
+                                # 流中途失败时先补一个段落分隔，再拼接回退内容
+                                separator = "\n\n"
+                                full_parts.append(separator)
+                                yield json.dumps({"content": separator})
+                            async for content in fallback.gentxt_stream(request):
+                                full_parts.append(content)
+                                yield json.dumps({"content": content})
+                        except Exception as fe:
+                            logger.error(f"DeepSeek fallback stream failed: {fe}")
+                            error_text = f"[ERROR] {friendly_error_message(fe)}"
+                            full_parts.append(error_text)
+                            yield json.dumps({"content": error_text})
+                    else:
+                        logger.error(f"Engine stream error: {e}")
+                        error_text = f"[ERROR] {friendly_error_message(e)}"
+                        full_parts.append(error_text)
+                        yield json.dumps({"content": error_text})
                 finally:
                     yield "[DONE]"
                 # 评测数据回流：流结束后总是沉淀（含失败会话，便于评测排查；写入失败仅记日志）
@@ -362,8 +409,14 @@ async def handle_generate_text(request: GenTxtRequest):
 
             return EventSourceResponse(event_generator(), media_type="text/event-stream")
 
-        # Non-streaming response
-        response = await service.gentxt(request)
+        # Non-streaming response（主通道失败时同样自动回退 DeepSeek 直连）
+        try:
+            response = await primary.gentxt(request)
+        except Exception as e:
+            if fallback is None:
+                raise
+            logger.warning(f"AI Hub failed, falling back to DeepSeek direct: {e}")
+            response = await fallback.gentxt(request)
         await persist_generation_log(
             request.project_id or "", request.model, user_query, response.content or "", enhancement
         )
