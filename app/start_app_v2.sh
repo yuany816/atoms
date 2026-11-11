@@ -150,35 +150,79 @@ find_available_port() {
 
 # Wait for backend health endpoint to be ready
 wait_for_backend_health() {
-    local max_attempts=60
-    local attempt=1
-    local health_url="http://$LOCAL_IP:$BACKEND_PORT/health"
-    
-    log_info "Waiting for backend health endpoint to be ready..."
-    log_info "Checking: $health_url"
-    
-    while [ $attempt -le $max_attempts ]; do
-        if [ -n "$USERNAME" ]; then
-            if curl -f -s "$health_url" -H "username: $USERNAME" >/dev/null 2>&1; then
+    if [ "${MGX_21503_TEMPLATE_PREVIEW_LIFECYCLE_ENABLED:-true}" = false ]; then
+        # Roll back to the backend-only probe and its old attempt budget.
+        # Per-request time limits remain to avoid an uninterruptible curl.
+        local attempt
+        local headers=()
+        [ -z "$USERNAME" ] || headers=(-H "username: $USERNAME")
+        for attempt in {1..60}; do
+            if curl --connect-timeout 2 --max-time 5 -f -s \
+                "http://$LOCAL_IP:$BACKEND_PORT/health" "${headers[@]}" >/dev/null 2>&1; then
                 log_success "Backend health endpoint is ready"
                 return 0
             fi
-        else
-            if curl -f -s "$health_url" >/dev/null 2>&1; then
-                log_success "Backend health endpoint is ready"
-                return 0
+            sleep 1
+        done
+        log_warning "Backend health endpoint did not become ready after 60 attempts"
+        return 1
+    fi
+    # Probe local services, bypassing proxy/HTTPS middleware for external hosts.
+    # Both the request time and the entire readiness phase are bounded.
+    local health_timeout=${MGX_PREVIEW_READINESS_TIMEOUT_SECONDS:-60}
+    if [[ ! "$health_timeout" =~ ^[1-9][0-9]{0,4}$ ]] || [ "$health_timeout" -gt 86400 ]; then
+        log_warning "Invalid preview readiness timeout; using 60 seconds"
+        health_timeout=60
+    fi
+    local deadline=$((SECONDS + health_timeout))
+    local remaining
+    local request_timeout
+    local pid
+    local backend_ready
+    local frontend_ready
+    local headers=()
+    [ -z "$USERNAME" ] || headers=(-H "username: $USERNAME")
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        for pid in "${BACKEND_RELOADER_PID:-}" "${FRONTEND_PID:-}"; do
+            if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+                log_error "Service exited before preview readiness (PID: $pid)"
+                return 1
+            fi
+        done
+        remaining=$((deadline - SECONDS))
+        request_timeout=$remaining
+        [ "$request_timeout" -le 5 ] || request_timeout=5
+        backend_ready=false
+        if curl --noproxy '*' --connect-timeout 2 --max-time "$request_timeout" -f -s \
+            "http://127.0.0.1:$BACKEND_PORT/health" "${headers[@]}" >/dev/null 2>&1; then
+            backend_ready=true
+        fi
+        frontend_ready=true
+        if [ -n "${FRONTEND_PID:-}" ]; then
+            frontend_ready=false
+            remaining=$((deadline - SECONDS))
+            [ "$remaining" -gt 0 ] || break
+            request_timeout=$remaining
+            [ "$request_timeout" -le 5 ] || request_timeout=5
+            if curl --noproxy '*' --connect-timeout 2 --max-time "$request_timeout" -f -s \
+                "http://127.0.0.1:$FRONTEND_PORT/" "${headers[@]}" >/dev/null 2>&1; then
+                frontend_ready=true
             fi
         fi
-        
-        if [ $((attempt % 5)) -eq 0 ]; then
-            log_info "Still waiting for backend health endpoint... (attempt $attempt/$max_attempts)"
+        if [ "$backend_ready" = true ] && [ "$frontend_ready" = true ]; then
+            # A process may have exited during the HTTP probe.
+            for pid in "${BACKEND_RELOADER_PID:-}" "${FRONTEND_PID:-}"; do
+                if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+                    log_error "Service exited during preview readiness (PID: $pid)"
+                    return 1
+                fi
+            done
+            log_success "Preview services are ready"
+            return 0
         fi
-        
         sleep 1
-        attempt=$((attempt + 1))
     done
-    
-    log_warning "Backend health endpoint did not become ready after $max_attempts attempts"
+    log_error "Preview services did not become ready within $health_timeout seconds"
     return 1
 }
 
@@ -201,18 +245,24 @@ reset_dirty_signal() {
     local response
     local http_code
     if [ -n "$USERNAME" ]; then
-        response=$(curl -s -w "\n%{http_code}" -X POST "$api_url" \
+        if ! response=$(curl --connect-timeout 5 --max-time 20 -sS -w "\n%{http_code}" -X POST "$api_url" \
             -H "Authorization: Bearer $access_token" \
             -H "Accept: application/json" \
             -H "Content-Type: application/json" \
             -H "username: $USERNAME" \
-            --data-raw "{\"value\": \"$value\"}" 2>&1)
+            --data-raw "{\"value\": \"$value\"}"); then
+            log_error "S2S request transport failed" >&2
+            return 1
+        fi
     else
-        response=$(curl -s -w "\n%{http_code}" -X POST "$api_url" \
+        if ! response=$(curl --connect-timeout 5 --max-time 20 -sS -w "\n%{http_code}" -X POST "$api_url" \
             -H "Authorization: Bearer $access_token" \
             -H "Accept: application/json" \
             -H "Content-Type: application/json" \
-            --data-raw "{\"value\": \"$value\"}" 2>&1)
+            --data-raw "{\"value\": \"$value\"}"); then
+            log_error "S2S request transport failed" >&2
+            return 1
+        fi
     fi
     
     http_code=$(echo "$response" | tail -n1)
@@ -222,7 +272,7 @@ reset_dirty_signal() {
         log_success "Dirty signal reset successfully"
         return 0
     else
-        log_warning "Failed to reset dirty signal (HTTP $http_code): $response"
+        log_warning "Failed to reset dirty signal (HTTP $http_code)"
         return 1
     fi
 }
@@ -246,18 +296,24 @@ reset_running_signal() {
     local response
     local http_code
     if [ -n "$USERNAME" ]; then
-        response=$(curl -s -w "\n%{http_code}" -X POST "$api_url" \
+        if ! response=$(curl --connect-timeout 5 --max-time 20 -sS -w "\n%{http_code}" -X POST "$api_url" \
             -H "Authorization: Bearer $access_token" \
             -H "Accept: application/json" \
             -H "Content-Type: application/json" \
             -H "username: $USERNAME" \
-            --data-raw "{\"value\": \"$value\"}" 2>&1)
+            --data-raw "{\"value\": \"$value\"}"); then
+            log_error "S2S request transport failed" >&2
+            return 1
+        fi
     else
-        response=$(curl -s -w "\n%{http_code}" -X POST "$api_url" \
+        if ! response=$(curl --connect-timeout 5 --max-time 20 -sS -w "\n%{http_code}" -X POST "$api_url" \
             -H "Authorization: Bearer $access_token" \
             -H "Accept: application/json" \
             -H "Content-Type: application/json" \
-            --data-raw "{\"value\": \"$value\"}" 2>&1)
+            --data-raw "{\"value\": \"$value\"}"); then
+            log_error "S2S request transport failed" >&2
+            return 1
+        fi
     fi
     
     http_code=$(echo "$response" | tail -n1)
@@ -267,7 +323,7 @@ reset_running_signal() {
         log_success "Running signal reset successfully"
         return 0
     else
-        log_warning "Failed to reset running signal (HTTP $http_code): $response"
+        log_warning "Failed to reset running signal (HTTP $http_code)"
         return 1
     fi
 }
@@ -291,23 +347,29 @@ get_dirty_signal() {
     local response
     local http_code
     if [ -n "$USERNAME" ]; then
-        response=$(curl -s -w "\n%{http_code}" -X GET "$api_url" \
+        if ! response=$(curl --connect-timeout 5 --max-time 20 -sS -w "\n%{http_code}" -X GET "$api_url" \
             -H "Authorization: Bearer $access_token" \
             -H "Accept: application/json" \
             -H "Content-Type: application/json" \
-            -H "username: $USERNAME" 2>&1)
+            -H "username: $USERNAME"); then
+            log_error "S2S request transport failed" >&2
+            return 1
+        fi
     else
-        response=$(curl -s -w "\n%{http_code}" -X GET "$api_url" \
+        if ! response=$(curl --connect-timeout 5 --max-time 20 -sS -w "\n%{http_code}" -X GET "$api_url" \
             -H "Authorization: Bearer $access_token" \
             -H "Accept: application/json" \
-            -H "Content-Type: application/json" 2>&1)
+            -H "Content-Type: application/json"); then
+            log_error "S2S request transport failed" >&2
+            return 1
+        fi
     fi
     
     http_code=$(echo "$response" | tail -n1)
     response=$(echo "$response" | sed '$d')
     
     if [ "$http_code" != "200" ]; then
-        log_warning "Failed to get dirty signal (HTTP $http_code): $response"
+        log_warning "Failed to get dirty signal (HTTP $http_code)"
         return 1
     fi
     
@@ -384,8 +446,8 @@ check_and_reload_env_if_dirty() {
     
     if get_dirty_signal; then
         log_warning "Dirty signal detected, reloading environment variables..."
-        cd "$BACKEND_DIR"
-        process_env_with_placeholders "$local_ip" "$backend_port" "$frontend_port" "$local_mode"
+        cd "$BACKEND_DIR" || return 1
+        process_env_with_placeholders "$local_ip" "$backend_port" "$frontend_port" "$local_mode" || return 1
         log_success "Environment variables reloaded successfully"
         return 0
     else
@@ -400,6 +462,7 @@ fetch_env_from_api() {
     local base_url=$1
     local access_token=$2
     local app_id=$3
+    local output_format=${4:-text}
     
     if [ -z "$base_url" ] || [ -z "$access_token" ]; then
         log_error "Base URL and access token are required for API fetch" >&2
@@ -422,32 +485,37 @@ fetch_env_from_api() {
     # Make API call
     local response
     local http_code
-    if [ -n "$USERNAME" ]; then
-        response=$(curl -s -w "\n%{http_code}" -X GET "$api_url" \
+    local attempt
+    local headers=()
+    [ -z "$USERNAME" ] || headers=(-H "username: $USERNAME")
+    # Retry only transport failures here, before starting either service. Each
+    # transfer has a 20s limit; three attempts plus backoff take at most 62s.
+    for attempt in 1 2 3; do
+        if response=$(curl --connect-timeout 5 --max-time 20 -sS -w "\n%{http_code}" -X GET "$api_url" \
             -H "Authorization: Bearer $access_token" \
             -H "Accept: application/json" \
-            -H "Content-Type: application/json" \
-            -H "username: $USERNAME" 2>&1)
-    else
-        response=$(curl -s -w "\n%{http_code}" -X GET "$api_url" \
-            -H "Authorization: Bearer $access_token" \
-            -H "Accept: application/json" \
-            -H "Content-Type: application/json" 2>&1)
-    fi
+            -H "Content-Type: application/json" "${headers[@]}"); then
+            break
+        fi
+        if [ "$attempt" = 3 ]; then
+            log_error "S2S request transport failed after 3 attempts" >&2
+            return 1
+        fi
+        log_warning "S2S request transport failed; retrying ($attempt/3)" >&2
+        sleep 1
+    done
     
     http_code=$(echo "$response" | tail -n1)
     response=$(echo "$response" | sed '$d')
     
     if [ "$http_code" != "200" ]; then
         { log_error "API call failed with HTTP code $http_code"; } >&2
-        { log_error "Response: $response"; } >&2
         return 1
     fi
     
     # Check if response is valid JSON and contains data
     if ! echo "$response" | grep -q '"code"'; then
         { log_error "Invalid API response format"; } >&2
-        { log_error "Response: $response"; } >&2
         return 1
     fi
     
@@ -455,7 +523,6 @@ fetch_env_from_api() {
     local code=$(echo "$response" | grep -o '"code"[[:space:]]*:[[:space:]]*[0-9]*' | grep -o '[0-9]*')
     if [ "$code" != "0" ]; then
         { log_error "API returned error code: $code"; } >&2
-        { log_error "Response: $response"; } >&2
         return 1
     fi
     
@@ -474,36 +541,52 @@ fetch_env_from_api() {
 import json
 import sys
 import base64
+import re
 
 try:
     response_b64 = sys.stdin.read().strip()
     response = base64.b64decode(response_b64).decode('utf-8')
     data = json.loads(response)
-    if data.get('code') == 0 and 'data' in data:
-        for item in data['data']:
+    if data.get('code') == 0 and isinstance(data.get('data'), list):
+        for index, item in enumerate(data['data'], 1):
             conf_key = item.get('conf_key', '')
             conf_value = item.get('conf_value', '')
-            if conf_key:
-                print(f\"{conf_key}={conf_value}\")
+            if not isinstance(conf_key, str) or not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_]*', conf_key):
+                print(f'WARNING: Skipping invalid environment variable name at record {index}', file=sys.stderr)
+                continue
+            if conf_key in ('MGX_21503_TEMPLATE_PREVIEW_LIFECYCLE_ENABLED', 'MGX_PREVIEW_READINESS_TIMEOUT_SECONDS'):
+                print(f'WARNING: Skipping platform-controlled environment variable at record {index}', file=sys.stderr)
+                continue
+            # Preserve the historical f-string conversion of non-string values.
+            conf_value = str(conf_value)
+            if '\x00' in conf_value:
+                raise ValueError('Invalid environment variable value')
+            if sys.argv[1] == 'base64':
+                conf_value = base64.b64encode(conf_value.encode('utf-8')).decode('ascii')
+            print(f\"{conf_key}={conf_value}\")
     else:
         print(f\"Error: API returned code {data.get('code')}\", file=sys.stderr)
         sys.exit(1)
-except Exception as e:
-    print(f\"Error parsing JSON: {e}\", file=sys.stderr)
+except Exception:
+    print('Error parsing API configuration', file=sys.stderr)
     sys.exit(1)
-")
+" "$output_format")
         local parse_exit_code=$?
-        if [ $parse_exit_code -eq 0 ] && [ -n "$env_content" ]; then
+        if [ $parse_exit_code -eq 0 ]; then
             { log_success "Successfully fetched environment variables from API"; } >&2
             { log_debug "Fetched $(echo "$env_content" | wc -l | tr -d ' ') environment variables"; } >&2
             # Output the content to stdout
-            echo "$env_content"
+            [ -z "$env_content" ] || printf '%s\n' "$env_content"
             return 0
         else
             { log_error "Failed to parse API response (exit code: $parse_exit_code)"; } >&2
             return 1
         fi
     else
+        if [ "$output_format" = base64 ]; then
+            log_error "python3 is required for lossless API configuration" >&2
+            return 1
+        fi
         # Fallback: try to parse manually (less reliable)
         { log_warning "python3 not available, attempting manual JSON parsing"; } >&2
         # This is a simplified parser - may not work for all cases
@@ -528,6 +611,7 @@ except Exception as e:
 
 # Process environment variables with placeholder replacement
 process_env_with_placeholders() {
+    local -a pending_env=()
     local local_ip=$1
     local backend_port=$2
     local frontend_port=$3
@@ -546,17 +630,11 @@ process_env_with_placeholders() {
     
     # Fetch environment variables from API
     local env_content=""
-    if ! env_content=$(fetch_env_from_api "$S2S_JWT_BASE_URL" "$S2S_JWT_ACCESS_TOKEN" "$S2S_APP_ID"); then
+    if ! env_content=$(fetch_env_from_api "$S2S_JWT_BASE_URL" "$S2S_JWT_ACCESS_TOKEN" "$S2S_APP_ID" base64); then
         log_error "Failed to fetch environment variables from API"
         return 1
     fi
     
-    if [ -z "$env_content" ]; then
-        log_error "No environment variables fetched from API"
-        return 1
-    fi
-
-    reset_dirty_signal
     
     log_info "Using environment variables from API"
     log_debug "Fetched $(echo "$env_content" | wc -l | tr -d ' ') environment variables"
@@ -576,7 +654,11 @@ process_env_with_placeholders() {
             
             # Check if line contains DEV_BASE_URL assignment
             if [[ "$line" =~ ^[[:space:]]*DEV_BASE_URL[[:space:]]*=(.*)$ ]]; then
-                dev_base_url="${BASH_REMATCH[1]}"
+                if ! dev_base_url=$(printf '%s' "${BASH_REMATCH[1]}" | base64 -d && printf '.'); then
+                    log_error "Failed to decode DEV_BASE_URL"
+                    return 1
+                fi
+                dev_base_url=${dev_base_url%.}
                 # Remove leading/trailing whitespace and quotes
                 dev_base_url=$(echo "$dev_base_url" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
                 dev_base_url=$(echo "$dev_base_url" | sed 's/^["'\'']//;s/["'\'']$//')
@@ -598,8 +680,8 @@ process_env_with_placeholders() {
     fi
     # Note: In local_mode, dev_base_url and dev_base_domain remain empty and are not used
     
-    # Second pass: Process each line from env_content
-    # Format: key=value (no quotes)
+    # One record per real key; encoded values cannot create extra records.
+    # The decoding sentinel preserves trailing newlines in command substitution.
     local line_count=0
     local processed_count=0
     local skipped_count=0
@@ -619,56 +701,62 @@ process_env_with_placeholders() {
             log_info "Skipping $(echo "$line" | cut -d= -f1) as it's set manually"
             continue
         fi
+
+        local key="${line%%=*}"
+        case "$key" in MGX_21503_TEMPLATE_PREVIEW_LIFECYCLE_ENABLED|MGX_PREVIEW_READINESS_TIMEOUT_SECONDS)
+            log_warning "Skipping platform-controlled environment variable"
+            continue ;;
+        esac
+        if [[ ! "$line" = *=* ]] || [[ ! "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+            log_error "Invalid environment variable name"
+            return 1
+        fi
+        local value
+        if ! value=$(printf '%s' "${line#*=}" | base64 -d && printf '.'); then
+            log_error "Failed to decode environment variable: $key"
+            return 1
+        fi
+        value=${value%.}
         
         processed_count=$((processed_count + 1))
-        log_debug "Line $line_count: Before replacement: $line"
         
-        # Apply placeholder replacements directly to the line
+        # Replace placeholders only after restoring the complete value.
         if [ "$local_mode" = true ]; then
             # Local mode: Replace domain placeholders with local IP and ports
-            line="${line//\$\$BACKEND_DOMAIN\$\$/$local_ip:$backend_port}"
-            line="${line//\$\$FRONTEND_DOMAIN\$\$/$local_ip:$frontend_port}"
+            value="${value//\$\$BACKEND_DOMAIN\$\$/$local_ip:$backend_port}"
+            value="${value//\$\$FRONTEND_DOMAIN\$\$/$local_ip:$frontend_port}"
         else
             # Non-local mode: Replace domain placeholders with DEV_BASE_URL domain
             if [ -n "$dev_base_domain" ]; then
-                line="${line//\$\$BACKEND_DOMAIN\$\$/$dev_base_domain}"
-                line="${line//\$\$FRONTEND_DOMAIN\$\$/$dev_base_domain}"
+                value="${value//\$\$BACKEND_DOMAIN\$\$/$dev_base_domain}"
+                value="${value//\$\$FRONTEND_DOMAIN\$\$/$dev_base_domain}"
             else
-                line="${line//\$\$BACKEND_DOMAIN\$\$/\/}"
-                line="${line//\$\$FRONTEND_DOMAIN\$\$/\/}"
+                value="${value//\$\$BACKEND_DOMAIN\$\$/\/}"
+                value="${value//\$\$FRONTEND_DOMAIN\$\$/\/}"
             fi
         fi
         
         # Replace $$SERVER_ADDR$$ placeholder
-        line="${line//\$\$SERVER_ADDR\$\$/$local_ip}"
+        value="${value//\$\$SERVER_ADDR\$\$/$local_ip}"
         
-        log_debug "Line $line_count: After replacement: $line"
         
-        # Export directly: export "KEY=VALUE"
-        if export "$line" 2>&1; then
-            log_info "Exported: $line"
-        else
-            log_error "Failed to export: $line (exit code: $?)"
-        fi
+        # Keep project data out of Bash's dynamically scoped launcher variables.
+        # The external env process applies these records only to each service.
+        pending_env+=("$key=$value")
+        log_info "Prepared environment variable: $key"
     done <<< "$env_content"
     
     log_debug "Finished processing. Total lines: $line_count, Processed: $processed_count, Skipped: $skipped_count"
     
-    # Debug: Show all exported environment variables (extract variable names from env_content)
-    log_debug "All exported environment variables:"
-    while IFS= read -r line || [ -n "$line" ]; do
-        if [[ "$line" =~ ^[[:space:]]*([^=]+)= ]]; then
-            local var_name="${BASH_REMATCH[1]}"
-            var_name=$(echo "$var_name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            if [ -n "${!var_name}" ]; then
-                log_debug "  $var_name=${!var_name}"
-            fi
-        fi
-    done <<< "$env_content"
+    # A failed signal acknowledgement must not masquerade as a config failure.
+    MGX_PREVIEW_SERVICE_ENV=("${pending_env[@]}")
+    reset_dirty_signal || log_warning "Could not acknowledge dirty signal"
+    return 0
 }
 
 # Process environment variables with placeholder replacement
 process_env_with_placeholders_from_file() {
+    local -a pending_env=()
     local env_file=$1
     local local_ip=$2
     local backend_port=$3
@@ -739,6 +827,11 @@ process_env_with_placeholders_from_file() {
             # Remove quotes if present
             value=$(echo "$value" | sed 's/^["'\'']//;s/["'\'']$//')
 
+            case "$key" in MGX_21503_TEMPLATE_PREVIEW_LIFECYCLE_ENABLED|MGX_PREVIEW_READINESS_TIMEOUT_SECONDS)
+                log_warning "Skipping platform-controlled environment variable"
+                continue ;;
+            esac
+
             # Skip BACKEND_PORT and FRONTEND_PORT as they are set manually
             if [ "$key" = "BACKEND_PORT" ] || [ "$key" = "FRONTEND_PORT" ]; then
                 log_info "Skipping $key as it's set manually"
@@ -777,10 +870,16 @@ process_env_with_placeholders_from_file() {
             # log_info "After replacement: $key=$value"
 
             # Export the processed environment variable
-            export "$key=$value"
-            log_info "Exported: $key=$value"
+            if [[ ! "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+                log_error "Invalid environment variable name"
+                return 1
+            fi
+            pending_env+=("$key=$value")
+            log_info "Prepared environment variable: $key"
         fi
     done < "$env_file"
+    MGX_PREVIEW_SERVICE_ENV=("${pending_env[@]}")
+    return 0
 }
 
 
@@ -809,9 +908,12 @@ find_available_port_pair() {
 
 # Start services with retry mechanism
 start_services_with_retry() {
+    local -a MGX_PREVIEW_SERVICE_ENV=()
     local max_retries=3
     local retry_count=0
     local current_offset=0
+    local lifecycle_enabled=${MGX_21503_TEMPLATE_PREVIEW_LIFECYCLE_ENABLED:-true}
+    local config_status
     
     # Determine which function to use based on S2S JWT parameters
     # Priority: API mode if S2S JWT parameters are available, otherwise file mode
@@ -849,17 +951,22 @@ start_services_with_retry() {
         export FRONTEND_PORT=$FRONTEND_PORT
 
         # Switch to backend directory
-        cd "$BACKEND_DIR"
+        cd "$BACKEND_DIR" || return 1
 
         # Update backend environment configuration
         log_info "Updating Backend environment configuration..."
         log_debug "Before backend env processing - FRONTEND_PORT='$FRONTEND_PORT'"
+        config_status=0
         if [ "$use_file_mode" = true ]; then
             # Use env file from project root (app/.env)
-            process_env_with_placeholders_from_file "$env_file_path" "$LOCAL_IP" "$BACKEND_PORT" "$FRONTEND_PORT" "$LOCAL_MODE"
+            process_env_with_placeholders_from_file "$env_file_path" "$LOCAL_IP" "$BACKEND_PORT" "$FRONTEND_PORT" "$LOCAL_MODE" || config_status=$?
         else
             # Use API-based environment variable processing
-            process_env_with_placeholders "$LOCAL_IP" "$BACKEND_PORT" "$FRONTEND_PORT" "$LOCAL_MODE"
+            process_env_with_placeholders "$LOCAL_IP" "$BACKEND_PORT" "$FRONTEND_PORT" "$LOCAL_MODE" || config_status=$?
+        fi
+        if [ "$config_status" != 0 ]; then
+            [ "$lifecycle_enabled" = false ] || return 1
+            log_warning "Backend configuration failed; continuing with legacy startup behavior"
         fi
         # Ensure IS_LAMBDA is always set to false for local development
         export IS_LAMBDA=false
@@ -868,12 +975,20 @@ start_services_with_retry() {
 
         # Start backend service
         log_info "Starting Backend service...$BACKEND_PORT"
-        uvicorn main:app --host 0.0.0.0 --port $BACKEND_PORT --reload --reload-exclude "*.log" --reload-exclude "*.pyc" &
+        env "${MGX_PREVIEW_SERVICE_ENV[@]}" IS_LAMBDA=false ENVIRONMENT=dev WATCHFILES_FORCE_POLLING=true WATCHFILES_POLL_DELAY_MS=600 uvicorn main:app --host 0.0.0.0 --port $BACKEND_PORT --reload --reload-exclude "*.log" --reload-exclude "*.pyc" &
         BACKEND_RELOADER_PID=$!  # Parent process (reloader)
 
         # Wait for backend to start
         log_info "Waiting for Backend service to start..."
-        # sleep 25
+        # Give bind/strict-port errors time to terminate the launcher before
+        # choosing whether to retry with another pair of ports.
+        local startup_probe
+        if [ "$lifecycle_enabled" != false ]; then
+            for startup_probe in 1 2 3 4 5; do
+                kill -0 "$BACKEND_RELOADER_PID" 2>/dev/null || break
+                sleep .1
+            done
+        fi
 
         # Check if backend started successfully
         if ! kill -0 $BACKEND_RELOADER_PID 2>/dev/null; then
@@ -898,27 +1013,43 @@ start_services_with_retry() {
         log_success "Backend started (URL: http://$LOCAL_IP:$BACKEND_PORT)"
 
         # Switch to frontend directory
-        cd "$FRONTEND_DIR"
+        cd "$FRONTEND_DIR" || return 1
 
         # Update frontend environment configuration
         # log_info "Updating Frontend environment configuration..."
         # log_debug "Before frontend env processing - FRONTEND_PORT='$FRONTEND_PORT'"
+        config_status=0
         if [ "$use_file_mode" = true ]; then
             # Use env file from project root (app/.env)
-            process_env_with_placeholders_from_file "$env_file_path" "$LOCAL_IP" "$BACKEND_PORT" "$FRONTEND_PORT" "$LOCAL_MODE"
+            process_env_with_placeholders_from_file "$env_file_path" "$LOCAL_IP" "$BACKEND_PORT" "$FRONTEND_PORT" "$LOCAL_MODE" || config_status=$?
         else
             # Use API-based environment variable processing
-            process_env_with_placeholders "$LOCAL_IP" "$BACKEND_PORT" "$FRONTEND_PORT" "$LOCAL_MODE"
+            process_env_with_placeholders "$LOCAL_IP" "$BACKEND_PORT" "$FRONTEND_PORT" "$LOCAL_MODE" || config_status=$?
+        fi
+        if [ "$config_status" != 0 ]; then
+            [ "$lifecycle_enabled" = false ] || return 1
+            log_warning "Frontend configuration failed; continuing with legacy startup behavior"
         fi
 
         # Start frontend service
         log_info "Starting Frontend service...$FRONTEND_PORT"
-        $PACKAGE_MANAGER dev --host "0.0.0.0" --port $FRONTEND_PORT &
+        local strict_port=()
+        [ "$lifecycle_enabled" = false ] || strict_port=(--strictPort)
+        if [ "$PACKAGE_MANAGER" = npm ]; then
+            env "${MGX_PREVIEW_SERVICE_ENV[@]}" npm run dev -- --host "0.0.0.0" --port "$FRONTEND_PORT" "${strict_port[@]}" &
+        else
+            env "${MGX_PREVIEW_SERVICE_ENV[@]}" "$PACKAGE_MANAGER" dev --host "0.0.0.0" --port "$FRONTEND_PORT" "${strict_port[@]}" &
+        fi
         FRONTEND_PID=$!
 
         # Wait for frontend to start
         log_info "Waiting for Frontend service to start..."
-        # sleep 5
+        if [ "$lifecycle_enabled" != false ]; then
+            for startup_probe in 1 2 3 4 5; do
+                kill -0 "$FRONTEND_PID" 2>/dev/null || break
+                sleep .1
+            done
+        fi
 
         # Check if frontend started successfully
         if ! kill -0 $FRONTEND_PID 2>/dev/null; then
@@ -956,36 +1087,118 @@ start_services_with_retry() {
 }
 
 # Cleanup function
+# Collect only descendants of the service processes started by this shell.
+_mgx_preview_process_tree() {
+    local pid="$1" child_pid
+    for child_pid in $(pgrep -P "$pid" 2>/dev/null || true); do
+        _mgx_preview_process_tree "$child_pid"
+    done
+    echo "$pid"
+}
+
+_MGX_PREVIEW_CLEANUP_STARTED=0
 cleanup() {
+    if [ "${MGX_21503_TEMPLATE_PREVIEW_LIFECYCLE_ENABLED:-true}" = false ]; then
+        # Keep the pre-MGX-21503 cleanup behavior available at runtime, including
+        # for workspaces whose startup functions have already been migrated.
+        log_info "Cleaning up processes..."
+        if [ -n "${BACKEND_RELOADER_PID:-}" ]; then
+            local backend_child_pids=$(pgrep -P "$BACKEND_RELOADER_PID" 2>/dev/null || true)
+            if [ -n "$backend_child_pids" ]; then
+                local child_pid
+                for child_pid in $backend_child_pids; do
+                    kill "$child_pid" 2>/dev/null || true
+                done
+                sleep 1
+            fi
+            kill "$BACKEND_RELOADER_PID" 2>/dev/null || true
+            log_info "Backend process stopped (PID: $BACKEND_RELOADER_PID)"
+        fi
+        if [ -n "${FRONTEND_PID:-}" ]; then
+            kill "$FRONTEND_PID" 2>/dev/null || true
+            log_info "Frontend process stopped (PID: $FRONTEND_PID)"
+        fi
+        sleep 2
+        log_success "Cleanup completed"
+        return 0
+    fi
+    [ "$_MGX_PREVIEW_CLEANUP_STARTED" = 1 ] && return 0
+    _MGX_PREVIEW_CLEANUP_STARTED=1
+    # EXIT owns cleanup; repeated signals must not interrupt it or run it twice.
+    trap '' INT TERM
     log_info "Cleaning up processes..."
 
-    # Kill backend process: child processes first, then reloader
-    if [ ! -z "$BACKEND_RELOADER_PID" ]; then
-        local backend_child_pids=$(pgrep -P $BACKEND_RELOADER_PID 2>/dev/null || true)
-        if [ ! -z "$backend_child_pids" ]; then
-            for child_pid in $backend_child_pids; do
-                kill $child_pid 2>/dev/null || true
+    local pid parent_pid child_pid roots="" pids="" attempt alive
+    for pid in "${_MGX_PREVIEW_MAIN_PID:-}" "${BACKEND_RELOADER_PID:-}" "${FRONTEND_PID:-}"; do
+        case "$pid" in ''|*[!0-9]*) continue ;; esac
+        if parent_pid=$(ps -o ppid= -p "$pid" 2>/dev/null); then
+            parent_pid=${parent_pid//[[:space:]]/}
+        else
+            # pgrep is also used for the descendant walk. It can establish
+            # direct ownership when the image lacks procps-compatible ps.
+            parent_pid=""
+            for child_pid in $(pgrep -P "$$" 2>/dev/null || true); do
+                [ "$child_pid" != "$pid" ] || parent_pid=$$
             done
-            sleep 1
         fi
-        kill $BACKEND_RELOADER_PID 2>/dev/null || true
-        log_info "Backend process stopped (PID: $BACKEND_RELOADER_PID)"
-    fi
-
-    # Kill frontend process
-    if [ ! -z "$FRONTEND_PID" ]; then
-        kill $FRONTEND_PID 2>/dev/null || true
-        log_info "Frontend process stopped (PID: $FRONTEND_PID)"
-    fi
-
-    # Wait for processes to exit completely
-    sleep 2
-
+        # Do not signal a stale PID that now belongs to another process.
+        [ "$parent_pid" = "$$" ] || continue
+        roots="$roots $pid"
+        pids="$pids $(_mgx_preview_process_tree "$pid")"
+    done
+    for pid in $pids; do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+    for attempt in 1 2 3; do
+        alive=false
+        for pid in $pids; do
+            if kill -0 "$pid" 2>/dev/null; then alive=true; break; fi
+        done
+        [ "$alive" = false ] && break
+        sleep 1
+    done
+    for pid in $pids; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    done
+    for pid in $roots; do
+        wait "$pid" 2>/dev/null || true
+    done
+    # This is a process-tree snapshot: a descendant created during cleanup may
+    # outlive it and retain an inherited lock FD until that descendant exits.
+    # The shell exits after cleanup, releasing its own startup lock FD.
     log_success "Cleanup completed"
 }
 
-# Set signal handling
-trap cleanup EXIT INT TERM
+# Set signal handling. The rollback path retains the old non-exiting traps.
+if [ "${MGX_21503_TEMPLATE_PREVIEW_LIFECYCLE_ENABLED:-true}" = false ]; then
+    trap cleanup EXIT INT TERM
+else
+    trap cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+fi
+
+# Waiting on a foreground installer defers Bash traps. Keep an interruptible
+# supervisor outside main; its fresh Bash worker retains normal $$ ownership.
+_mgx_preview_run_main() {
+    if [ "${MGX_21503_TEMPLATE_PREVIEW_LIFECYCLE_ENABLED:-true}" = false ]; then
+        unset _MGX_PREVIEW_WORKER
+        main "$@"
+    elif [ "${_MGX_PREVIEW_WORKER:-}" = 1 ]; then
+        # The marker selects this shell only; descendants must get a supervisor
+        # when they invoke the script themselves.
+        unset _MGX_PREVIEW_WORKER
+        main "$@"
+    else
+        _MGX_PREVIEW_WORKER=1 bash "$0" "$@" &
+        _MGX_PREVIEW_MAIN_PID=$!
+        local status=0
+        wait "$_MGX_PREVIEW_MAIN_PID" || status=$?
+        return "$status"
+    fi
+}
 
 # Parse command line arguments
 parse_arguments() {
@@ -1191,7 +1404,10 @@ main() {
         log_info "To start the services, run: $0"
     else
         # Wait for backend health endpoint to be ready before displaying success message
-        wait_for_backend_health
+        if ! wait_for_backend_health; then
+            [ "${MGX_21503_TEMPLATE_PREVIEW_LIFECYCLE_ENABLED:-true}" = false ] || return 1
+            log_warning "Continuing after backend health failure with legacy startup behavior"
+        fi
         
         log_success "=== Application Started Successfully ==="
         echo "Backend URL:  http://$LOCAL_IP:$BACKEND_PORT"
@@ -1208,7 +1424,8 @@ main() {
         # Only check dirty signal if using API mode (.env not exists)
         local env_file="$SCRIPT_DIR/.env"
         if [ ! -f "$env_file" ]; then
-            check_and_reload_env_if_dirty "$LOCAL_IP" "$BACKEND_PORT" "$FRONTEND_PORT" "$LOCAL_MODE"
+            check_and_reload_env_if_dirty "$LOCAL_IP" "$BACKEND_PORT" "$FRONTEND_PORT" "$LOCAL_MODE" || \
+                log_warning "Environment reload failed; keeping ready preview services running"
         else
             log_info "Using file-based mode, skipping dirty signal check"
         fi
@@ -1219,4 +1436,4 @@ main() {
 }
 
 # Run main function
-main "$@"
+_mgx_preview_run_main "$@"
