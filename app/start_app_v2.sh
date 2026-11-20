@@ -975,7 +975,7 @@ start_services_with_retry() {
 
         # Start backend service
         log_info "Starting Backend service...$BACKEND_PORT"
-        env "${MGX_PREVIEW_SERVICE_ENV[@]}" IS_LAMBDA=false ENVIRONMENT=dev WATCHFILES_FORCE_POLLING=true WATCHFILES_POLL_DELAY_MS=600 uvicorn main:app --host 0.0.0.0 --port $BACKEND_PORT --reload --reload-exclude "*.log" --reload-exclude "*.pyc" &
+        env "${MGX_PREVIEW_SERVICE_ENV[@]}" IS_LAMBDA=false ENVIRONMENT=dev WATCHFILES_FORCE_POLLING=true WATCHFILES_POLL_DELAY_MS=600 WATCHFILES_FORCE_POLLING=true uvicorn main:app --host 0.0.0.0 --port $BACKEND_PORT --reload --reload-exclude "*.log" --reload-exclude "*.pyc" &
         BACKEND_RELOADER_PID=$!  # Parent process (reloader)
 
         # Wait for backend to start

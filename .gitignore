@@ -59,3 +59,5 @@ __pycache__
 code.ipynb
 .ipynb_checkpoints/
 .wiki.md
+# 平台内部 wiki 及草稿（可能含敏感内容）
+.wiki.md*
