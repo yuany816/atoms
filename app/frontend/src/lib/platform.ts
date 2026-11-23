@@ -20,6 +20,23 @@ export interface ChatMessage {
   model?: string;
   createdAt: number;
   error?: boolean;
+  /** 输出中途中断等非致命提示（已收到的内容仍保留在 content 中） */
+  notice?: string;
+  /** 本条回复未完整写入项目的文件（提供「让 AI 补全」入口） */
+  pendingPaths?: string[];
+}
+
+/**
+ * AI 未输出完整的文件（文件块未闭合）：单独保存为「不完整」草稿，不进入 files，
+ * 因此不参与预览、发布与分享，也不会覆盖已有文件。
+ */
+export interface DraftFile {
+  path: string;
+  content: string;
+  /** 来源回复的时间，用于与已有文件比较新旧 */
+  createdAt: number;
+  /** 用户已丢弃：保留记录以免从历史对话再次恢复 */
+  dismissed?: boolean;
 }
 
 export interface TerminalLog {
@@ -34,6 +51,8 @@ export interface Project {
   name: string;
   templateId: string;
   files: ProjectFile[];
+  /** 不完整文件草稿（见 DraftFile） */
+  drafts?: DraftFile[];
   messages: ChatMessage[];
   logs: TerminalLog[];
   publishedSlug?: string;

@@ -1,13 +1,13 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { attachAtomsHost, buildPreviewHtml } from '@/lib/engine';
+import { attachAtomsHost, buildPreviewHtml, findMissingAssets } from '@/lib/engine';
 import { fetchPublished } from '@/lib/platform';
 
 /**
  * 已发布应用页 /p/:slug：从云端读取发布快照，
- * 以 iframe blob 渲染，并挂载 window.atoms 数据桥（按原 project_id 隔离）。
+ * 以 iframe srcdoc 隔离沙箱渲染，并挂载 window.atoms 数据桥（按原 project_id 隔离）。
  */
 export default function PublishedApp() {
   const { slug } = useParams<{ slug: string }>();
@@ -16,6 +16,7 @@ export default function PublishedApp() {
     name: string;
     projectId: string;
     html: string;
+    missing: string[];
   } | null>(null);
 
   useEffect(() => attachAtomsHost(), []);
@@ -32,7 +33,12 @@ export default function PublishedApp() {
           setStatus('missing');
           return;
         }
-        setSnapshot({ name: data.name, projectId: data.project_id, html });
+        setSnapshot({
+          name: data.name,
+          projectId: data.project_id,
+          html,
+          missing: findMissingAssets(data.files ?? {}),
+        });
         setStatus('ready');
         if (data.name) document.title = `${data.name}`;
       })
@@ -44,17 +50,6 @@ export default function PublishedApp() {
     };
   }, [slug]);
 
-  const blobUrl = useMemo(() => {
-    if (!snapshot) return null;
-    return URL.createObjectURL(new Blob([snapshot.html], { type: 'text/html' }));
-  }, [snapshot]);
-
-  useEffect(() => {
-    return () => {
-      if (blobUrl) URL.revokeObjectURL(blobUrl);
-    };
-  }, [blobUrl]);
-
   if (status === 'loading') {
     return (
       <div className="flex h-screen flex-col items-center justify-center gap-3 bg-background">
@@ -64,7 +59,7 @@ export default function PublishedApp() {
     );
   }
 
-  if (status === 'missing' || !blobUrl) {
+  if (status === 'missing' || !snapshot) {
     return (
       <div className="flex h-screen flex-col items-center justify-center gap-4 bg-background">
         <p className="text-lg font-medium text-foreground">应用不存在或已被删除</p>
@@ -82,12 +77,20 @@ export default function PublishedApp() {
         <span className="truncate text-xs font-medium text-foreground">{snapshot?.name}</span>
         <span className="shrink-0 font-mono text-xs text-muted-foreground">/p/{slug}</span>
       </header>
-      <iframe
-        title={snapshot?.name || '已发布应用'}
-        src={blobUrl}
-        sandbox="allow-scripts allow-forms allow-modals allow-popups"
-        className="min-h-0 w-full flex-1 bg-white"
-      />
+      {snapshot.missing.length > 0 ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center text-sm text-muted-foreground">
+          <p className="text-foreground">这个已发布版本不完整，应用无法运行。</p>
+          <p className="break-all font-mono text-xs">缺失文件：{snapshot.missing.join('、')}</p>
+          <p className="text-xs">请回到项目工作区补全文件后重新发布。</p>
+        </div>
+      ) : (
+        <iframe
+          title={snapshot.name || '已发布应用'}
+          srcDoc={snapshot.html}
+          sandbox="allow-scripts allow-forms allow-modals allow-popups"
+          className="min-h-0 w-full flex-1 bg-white"
+        />
+      )}
     </div>
   );
 }

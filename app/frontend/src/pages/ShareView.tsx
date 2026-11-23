@@ -2,7 +2,13 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Loader2, MessageSquare } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { attachAtomsHost, buildPreviewHtml } from '@/lib/engine';
+import {
+  attachAtomsHost,
+  buildPreviewHtml,
+  extractFilePaths as extractPaths,
+  findMissingAssets,
+  stripFileBlocks,
+} from '@/lib/engine';
 import { fetchShare, formatTime } from '@/lib/platform';
 
 interface SharedMessage {
@@ -10,19 +16,6 @@ interface SharedMessage {
   content: string;
   model?: string;
   createdAt?: number;
-}
-
-/** 去掉文件块，仅显示说明文字。 */
-function stripFileBlocks(content: string): string {
-  return content.replace(/<atoms-file path="[^"]+">[\s\S]*?<\/atoms-file>/g, '').trim();
-}
-
-function extractPaths(content: string): string[] {
-  const paths: string[] = [];
-  const pattern = /<atoms-file path="([^"]+)">/g;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(content)) !== null) paths.push(match[1]);
-  return paths;
 }
 
 /**
@@ -71,17 +64,7 @@ export default function ShareView() {
     if (!data) return null;
     return buildPreviewHtml(data.files, data.projectId);
   }, [data]);
-
-  const blobUrl = useMemo(() => {
-    if (!html) return null;
-    return URL.createObjectURL(new Blob([html], { type: 'text/html' }));
-  }, [html]);
-
-  useEffect(() => {
-    return () => {
-      if (blobUrl) URL.revokeObjectURL(blobUrl);
-    };
-  }, [blobUrl]);
+  const missingAssets = useMemo(() => (data ? findMissingAssets(data.files) : []), [data]);
 
   if (status === 'loading') {
     return (
@@ -165,10 +148,16 @@ export default function ShareView() {
 
         {/* 应用渲染 */}
         <section className="min-w-0 flex-1">
-          {blobUrl ? (
+          {missingAssets.length > 0 ? (
+            <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-sm text-muted-foreground">
+              <p className="text-foreground">这份分享快照不完整，应用无法运行。</p>
+              <p className="break-all font-mono text-xs">缺失文件：{missingAssets.join('、')}</p>
+              <p className="text-xs">请回到项目工作区补全文件后重新分享。</p>
+            </div>
+          ) : html ? (
             <iframe
               title={data.name}
-              src={blobUrl}
+              srcDoc={html}
               sandbox="allow-scripts allow-forms allow-modals allow-popups"
               className="h-full w-full bg-white"
             />
